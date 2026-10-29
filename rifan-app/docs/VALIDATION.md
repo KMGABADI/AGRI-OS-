@@ -87,3 +87,9 @@ See [RENDER.md](RENDER.md) for exact dashboard settings, persistent storage and 
 - Whole-registry validation checked all **172,743 private farmers** successfully; **12,381 rejected source rows** were rechecked with no fabricated replacements. SQLite integrity, duplicate-group and imported-source-link checks passed.
 - The new Data quality screen passed browser tests for complete auditing, repeated rechecks, aggregate-report downloads, mobile layout and absence of uncaught errors. The existing route/registration/card/export/import browser regression suite also passed against isolated synthetic data.
 - Private source files, farmer data, reports and the pre-maintenance backup remain excluded from GitHub.
+
+## Google connection follow-up — 29 October 2026
+
+TypeScript and 63 automated tests pass, including safe missing-configuration responses, in-app redirect recovery, PKCE, hashed/user-bound/expiring/single-use state, cancelled authorization, lost RIFAN sessions, callback token failures, refresh-token preservation, refresh rotation, revoked grants, optional Gmail permission and non-destructive disconnect. Provider fixtures make no live Google requests or email sends. Real sign-in remains dependent on a Google Cloud OAuth Web client and matching Render environment settings.
+
+The production build and six deployment checks also pass. Browser checks verified missing-setting diagnostics, a disabled unconfigured Connect action, the exact copyable callback URI, legacy connect URL recovery, failed-callback recovery, mobile layout without overflow, and no uncaught errors. The existing registration/import/card/export route regression suite passed against separate synthetic data. These checks do not claim that live Render credentials or a real Google account have been configured.

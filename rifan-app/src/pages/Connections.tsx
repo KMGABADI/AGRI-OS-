@@ -20,6 +20,7 @@ import {
   Modal,
 } from "../components/ui";
 import { entityFields, type Row, canEdit } from "../model";
+import GoogleConnectionCard from "../components/operations/GoogleConnectionCard";
 export default function Connections() {
   const { snapshot, session, save, refresh, notify } = useWorkspace();
   const [edit, setEdit] = useState<Partial<Row> | null>(null),
@@ -55,41 +56,7 @@ export default function Connections() {
         description="Connect Google Sheets, Docs and Forms to your independent RIFAN workspace."
       />
       <div className="settings-grid">
-        <section className="panel detail-panel">
-          <div className="connection-heading">
-            <span className="stat-icon green">
-              <FileSpreadsheet size={26} />
-            </span>
-            <div>
-              <h2>Google Workspace</h2>
-              <p>Private registers, shared reports and collection forms.</p>
-            </div>
-            <Badge
-              tone={snapshot.integrations.googleConnected ? "green" : "gold"}
-            >
-              {snapshot.integrations.googleConnected
-                ? "Connected"
-                : "Not connected"}
-            </Badge>
-          </div>
-          <p>
-            Connect your own Google account. RIFAN account passwords are never
-            sent to Google, and Google tokens remain on the server.
-          </p>
-          <a className="button primary" href="/api/google/connect">
-            <Link2 size={16} />
-            Connect Google account <ArrowUpRight size={16} />
-          </a>
-          {!snapshot.integrations.google && (
-            <div className="info-strip">
-              <FileSpreadsheet size={18} />
-              <span>
-                Google OAuth configuration is required before private sheets can
-                connect. See the deployment instructions.
-              </span>
-            </div>
-          )}
-        </section>
+        <GoogleConnectionCard />
         <section className="panel detail-panel">
           <h3>Connected register workflow</h3>
           <ol className="flow-list">
@@ -152,7 +119,11 @@ export default function Connections() {
                 <div className="row-actions">
                   <button
                     className="button small-button"
-                    disabled={working || !canEdit(session.role, "farmers")}
+                    disabled={
+                      working ||
+                      !snapshot.integrations.googleConnected ||
+                      !canEdit(session.role, "farmers")
+                    }
                     onClick={() => {
                       setSync(r);
                       setSyncPreview(null);
@@ -163,7 +134,7 @@ export default function Connections() {
                   </button>
                   <button
                     className="button small-button"
-                    disabled={working}
+                    disabled={working || !snapshot.integrations.googleConnected}
                     onClick={() =>
                       run("/api/google/sheets/export", { url: r.url })
                     }
@@ -208,6 +179,7 @@ export default function Connections() {
         <div className="heading-actions">
           <button
             className="button"
+            disabled={!snapshot.integrations.googleConnected}
             onClick={async () => {
               try {
                 setFolders(await api("/api/google/folders"));
@@ -220,7 +192,7 @@ export default function Connections() {
           </button>
           <button
             className="button primary"
-            disabled={working}
+            disabled={working || !snapshot.integrations.googleConnected}
             onClick={() =>
               run("/api/google/sheets", { title, folderId: folder })
             }
@@ -230,7 +202,7 @@ export default function Connections() {
           </button>
           <button
             className="button"
-            disabled={working}
+            disabled={working || !snapshot.integrations.googleConnected}
             onClick={() => run("/api/google/forms", { title })}
           >
             <FormInput size={16} />
@@ -238,7 +210,7 @@ export default function Connections() {
           </button>
           <button
             className="button"
-            disabled={working}
+            disabled={working || !snapshot.integrations.googleConnected}
             onClick={() => run("/api/google/docs", {})}
           >
             <FileText size={16} />
@@ -301,7 +273,7 @@ export default function Connections() {
                 </button>
                 <button
                   className="button primary"
-                  disabled={working}
+                  disabled={working || !snapshot.integrations.googleConnected}
                   onClick={async () => {
                     setWorking(true);
                     try {
@@ -331,7 +303,7 @@ export default function Connections() {
             <div className="form-actions">
               <button
                 className="button primary"
-                disabled={working}
+                disabled={working || !snapshot.integrations.googleConnected}
                 onClick={async () => {
                   setWorking(true);
                   try {

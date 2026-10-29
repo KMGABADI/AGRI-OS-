@@ -3905,3 +3905,6 @@ input::placeholder,textarea::placeholder {color:#59675c;opacity:1}
 .detail-panel {padding:22px}
 button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible {outline:3px solid #9b7620;outline-offset:3px}
 @media(max-width:640px){.staged-filters{grid-template-columns:1fr 1fr}.checkbox-grid{grid-template-columns:1fr}.segmented{flex-wrap:wrap}.alert-card{flex-wrap:wrap}}
+.google-setup {background:var(--canvas);border:1px solid var(--line);border-radius:10px;padding:18px;color:var(--ink)}
+.google-setup li {margin:10px 0;line-height:1.65}
+.google-setup strong {overflow-wrap:anywhere}

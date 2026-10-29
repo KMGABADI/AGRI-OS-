@@ -24,7 +24,9 @@ Copy `.env.example` to an ignored local `.env` only when needed; do not put secr
 
 ## Google Workspace setup
 
-1. Create/use a Google Cloud project controlled by RIFAN. Enable Google Sheets, Drive, Docs, Forms and Gmail APIs as needed.
+See [the connection troubleshooting guide](GOOGLE_CONNECTION.md) for Render settings, exact callback matching, consent/test-user setup and recovery from the raw JSON error.
+
+1. Create/use a Google Cloud project controlled by RIFAN. Enable Google Sheets, Drive, Docs and Forms APIs as needed. Gmail is optional and authorized separately for alerts.
 2. Configure an OAuth consent screen and a **Web application** OAuth client.
 3. Register the exact redirect URI `https://YOUR-DEPLOYED-HOST/api/google/callback`.
 4. Set `PUBLIC_URL`, `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` securely.

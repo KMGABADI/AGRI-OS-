@@ -44,6 +44,12 @@ import { seedOperationsDemo } from "./features/demo";
 import { intelligenceFor } from "./features/intelligence";
 import { phoneKeys, canonicalPhone } from "../src/lib/phone";
 import { registerDataQuality, reconcileImport } from "./features/data-quality";
+import {
+  createGoogleConnection,
+  googleApiFailure,
+  type GoogleOAuthFactory,
+  GMAIL_SCOPE,
+} from "./features/google";
 
 type R = Request & { actor: Session };
 function fail(status: number, message: string): never {
@@ -72,6 +78,7 @@ export function createApi(
   options: {
     filename?: string;
     mailer?: Mailer;
+    googleOAuthFactory?: GoogleOAuthFactory;
     paystack?: PaymentGateway;
     paystackSecret?: string;
     demo?: boolean;
@@ -112,6 +119,11 @@ export function createApi(
   if (process.env.RENDER === "true") app.set("trust proxy", 1);
   const security = createSecurity(s, options.mailer);
   const payments = createPaystack(s, options.paystack, options.paystackSecret);
+  const googleConnection = createGoogleConnection(
+    s,
+    publicUrl,
+    options.googleOAuthFactory,
+  );
   payments.mountWebhook(app);
   app.use(express.json({ limit: "8mb" }));
   app.use((req, res, next) => {
@@ -191,6 +203,8 @@ export function createApi(
           .prepare("SELECT * FROM sessions WHERE token=? AND expires>?")
           .get(tokenHash(token), Date.now()) as any)
       : null;
+    if (!session && req.originalUrl.split("?")[0] === "/api/google/callback")
+      return res.redirect("/connections?google=sign_in_required");
     if (!session)
       return res
         .status(401)
@@ -629,6 +643,7 @@ export function createApi(
       return r;
     });
   const features = { app, s, allowed, requireWrite, farmerWhere };
+  googleConnection.mount(app);
   registerOperations(features);
   registerDataQuality({ ...features, duplicate, refCheck });
   payments.mountPrivate(features);
@@ -844,9 +859,6 @@ export function createApi(
               .all(a.space) as any[]
           ).map(publicUser)
         : [];
-      const google = s.db
-        .prepare("SELECT expires FROM integrations WHERE space=? AND user_id=?")
-        .get(a.space, a.id) as any;
       res.json({
         data,
         summary,
@@ -859,12 +871,8 @@ export function createApi(
         users,
         integrations: {
           gemini: !!process.env.GEMINI_API_KEY,
-          google: !!(
-            process.env.GOOGLE_CLIENT_ID &&
-            process.env.GOOGLE_CLIENT_SECRET &&
-            publicUrl
-          ),
-          googleConnected: !!google,
+          google: googleConnection.configured,
+          googleConnected: googleConnection.status(a).connected,
         },
       });
     }),
@@ -1972,105 +1980,8 @@ export function createApi(
       res.json(await r.json());
     }),
   );
-  // Google uses server-held OAuth tokens, separate from RIFAN account authentication.
-  const oauthClient = async () => {
-    if (
-      !process.env.GOOGLE_CLIENT_ID ||
-      !process.env.GOOGLE_CLIENT_SECRET ||
-      !publicUrl
-    )
-      fail(
-        503,
-        "Google Workspace is not configured. Set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET and PUBLIC_URL.",
-      );
-    const { google } = await import("googleapis");
-    return {
-      google,
-      client: new google.auth.OAuth2(
-        process.env.GOOGLE_CLIENT_ID,
-        process.env.GOOGLE_CLIENT_SECRET,
-        `${publicUrl}/api/google/callback`,
-      ),
-    };
-  };
-  app.get(
-    "/api/google/connect",
-    safe(async (req, res) => {
-      if (req.actor.demo)
-        fail(
-          400,
-          "Connect Google from your private workspace, not the shared demonstration.",
-        );
-      const { client } = await oauthClient();
-      const state = randomBytes(24).toString("hex");
-      s.put(req.actor.space, "chats", {
-        id: "oauth-state-" + req.actor.id,
-        state,
-        expires: Date.now() + 600000,
-      });
-      res.redirect(
-        client.generateAuthUrl({
-          access_type: "offline",
-          prompt: "consent",
-          state,
-          scope: [
-            "https://www.googleapis.com/auth/drive.file",
-            "https://www.googleapis.com/auth/spreadsheets",
-            "https://www.googleapis.com/auth/documents",
-            "https://www.googleapis.com/auth/forms.body",
-            "https://www.googleapis.com/auth/gmail.send",
-          ],
-        }),
-      );
-    }),
-  );
-  app.get(
-    "/api/google/callback",
-    safe(async (req, res) => {
-      const state = s.get(
-        req.actor.space,
-        "chats",
-        "oauth-state-" + req.actor.id,
-      );
-      if (
-        !state ||
-        state.state !== req.query.state ||
-        state.expires < Date.now()
-      )
-        fail(400, "Google authorization expired or is invalid");
-      s.remove(req.actor.space, "chats", state.id);
-      const { client } = await oauthClient();
-      const { tokens } = await client.getToken(String(req.query.code));
-      if (!tokens.access_token)
-        fail(400, "Google did not return an access token");
-      s.db
-        .prepare(
-          "INSERT INTO integrations(space,user_id,access_token,refresh_token,expires) VALUES(?,?,?,?,?) ON CONFLICT(space,user_id) DO UPDATE SET access_token=excluded.access_token,refresh_token=excluded.refresh_token,expires=excluded.expires",
-        )
-        .run(
-          req.actor.space,
-          req.actor.id,
-          tokens.access_token,
-          tokens.refresh_token || null,
-          tokens.expiry_date || 0,
-        );
-      res.redirect("/connections?connected=1");
-    }),
-  );
-  const googleFor = async (a: Session) => {
-    const tokens = s.db
-      .prepare("SELECT * FROM integrations WHERE space=? AND user_id=?")
-      .get(a.space, a.id) as any;
-    if (!tokens) fail(409, "Connect your Google account first");
-    const { google, client } = await oauthClient();
-    client.setCredentials({
-      access_token: tokens.access_token,
-      refresh_token: tokens.refresh_token,
-      expiry_date: tokens.expires,
-    });
-    return { google, auth: client };
-  };
-  const readSheet = async (a: Session, url: string) => {
+  const googleFor = googleConnection.googleFor;
+  const readSheet = async (a: Session, url: string): Promise<any[][]> => {
     if (
       !/^https:\/\/docs\.google\.com\/spreadsheets\/d\/[A-Za-z0-9_-]+/.test(url)
     )
@@ -2562,7 +2473,7 @@ export function createApi(
       const to = String(req.body.to || "");
       if (!/^[^\s@\r\n]+@[^\s@\r\n]+\.[^\s@\r\n]+$/.test(to))
         fail(400, "A valid recipient email is required");
-      const { google, auth } = await googleFor(req.actor);
+      const { google, auth } = await googleFor(req.actor, GMAIL_SCOPE);
       const subject = String(row.title || "RIFAN notification").replace(
         /[\r\n]/g,
         " ",
@@ -2848,14 +2759,32 @@ export function createApi(
     res.status(404).json({ error: "API endpoint not found" }),
   );
   app.use((error: any, _req: Request, res: Response, _next: NextFunction) => {
+    const googleFailure = googleApiFailure(error);
+    if (
+      googleFailure?.code === "GOOGLE_RECONNECT_REQUIRED" &&
+      (_req as R).actor
+    ) {
+      const a = (_req as R).actor;
+      s.db
+        .prepare("DELETE FROM integrations WHERE space=? AND user_id=?")
+        .run(a.space, a.id);
+    }
     const status =
+      googleFailure?.status ||
       error.status ||
       (String(error.message).includes("UNIQUE constraint") ? 409 : 400);
     res.status(status).json({
+      ...(error.code?.startsWith?.("GOOGLE_")
+        ? { code: error.code }
+        : googleFailure
+          ? { code: googleFailure.code }
+          : {}),
       error:
-        status >= 500
+        googleFailure?.message ||
+        error.publicMessage ||
+        (status >= 500
           ? "The service could not complete this request. Check configuration and try again."
-          : error.message || "Request failed",
+          : error.message || "Request failed"),
     });
   });
   return { app, store: s };
