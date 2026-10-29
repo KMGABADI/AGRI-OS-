@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import { UserRound, ShieldCheck } from "lucide-react";
 import { useWorkspace, api } from "../lib/workspace";
 import { PageHeading, Badge } from "../components/ui";
+import TwoFactorPanel from '../components/TwoFactorPanel';
 export default function Profile() {
   const { session, notify, logout } = useWorkspace();
   const [name, setName] = useState(session.name);
@@ -112,6 +113,7 @@ export default function Profile() {
           </form>
         </section>
       </div>
+      <TwoFactorPanel/>
     </>
   );
 }

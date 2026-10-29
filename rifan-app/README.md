@@ -77,3 +77,5 @@ Synchronization is an explicitly reviewed action, not a background claim of cont
 The future public website can submit consented applications to `POST /api/public/applications`. This creates a pending member/application and returns the configured fee schedule. The endpoint remains disabled until both the workspace setting and `ENABLE_PUBLIC_REGISTRATION=true` are set.
 
 The public website, farmer self-service accounts, live online charging, payment-provider webhooks and provider reconciliation must be implemented/configured before launch. No fee amount or payment provider was invented. Current payments are manual ledger entries, counted only after administrator verification; this application does not charge an account or transfer money.
+
+See [connected operations and security configuration](docs/OPERATIONS.md) for Dashboard, cohorts, planner, history, OTP and Paystack setup.

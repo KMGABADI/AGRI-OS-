@@ -10,8 +10,10 @@ import {
   Confirm,
 } from "../components/ui";
 import { ROLES, type Row } from "../model";
+import { AdminTwoFactor } from "../components/TwoFactorPanel";
 export default function Users() {
   const { snapshot, session, refresh, notify } = useWorkspace();
+  const [securityUser, setSecurityUser] = useState<Row | null>(null);
   const [edit, setEdit] = useState<Partial<Row> | null>(null),
     [deleting, setDeleting] = useState<Row | null>(null),
     [error, setError] = useState(""),
@@ -89,6 +91,12 @@ export default function Users() {
               render: (r) => (
                 <div className="row-actions">
                   <button
+                    className="button small-button"
+                    onClick={() => setSecurityUser(r)}
+                  >
+                    2FA
+                  </button>
+                  <button
                     className="icon-button"
                     aria-label={"Edit account " + r.name}
                     onClick={() => {
@@ -150,6 +158,12 @@ export default function Users() {
           ))}
         </div>
       </section>
+      {securityUser && (
+        <AdminTwoFactor
+          user={securityUser}
+          onClose={() => setSecurityUser(null)}
+        />
+      )}
       {edit && (
         <Modal
           title={edit.id ? "Manage team member" : "Add team member"}
@@ -171,6 +185,9 @@ export default function Users() {
                 .split(",")
                 .map((v: string) => v.trim())
                 .filter(Boolean);
+              values.plannerApproved = new FormData(e.currentTarget).has(
+                "plannerApproved",
+              );
               values.warehouseIds = String(values.warehouseIds || "")
                 .split(",")
                 .map((v: string) => v.trim())
@@ -259,6 +276,14 @@ export default function Users() {
                 <input
                   name="warehouseIds"
                   defaultValue={edit.warehouseIds?.join(", ")}
+                />
+              </label>
+              <label className="toggle-row field full">
+                <span>Approved harvest-planning officer</span>
+                <input
+                  type="checkbox"
+                  name="plannerApproved"
+                  defaultChecked={!!edit.plannerApproved}
                 />
               </label>
             </div>

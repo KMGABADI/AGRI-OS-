@@ -1,50 +1,83 @@
 import React, { useState, useEffect } from "react";
-import { Link } from "react-router-dom";
-import { ChevronLeft, ChevronRight, CalendarDays, Wheat } from "lucide-react";
-import { useWorkspace, api } from "../lib/workspace";
-import { PageHeading, Badge, Empty } from "../components/ui";
+import { Link, useSearchParams } from "react-router-dom";
+import {
+  ChevronLeft,
+  ChevronRight,
+  Plus,
+  Download,
+  CalendarDays,
+} from "lucide-react";
+import { api, useWorkspace } from "../lib/workspace";
+import { PageHeading, Badge, RecordForm, DataTable } from "../components/ui";
+import { entityFields, type Row } from "../model";
 import WeatherOutlook from "../components/WeatherOutlook";
-import { names, format } from "../model";
+const approved = (s: any) =>
+  ["Super Admin", "Admin", "Manager"].includes(s.role) ||
+  s.plannerApproved === true;
 export default function Calendar() {
-  const { snapshot } = useWorkspace();
-  const [month, setMonth] = useState(() => {
-      const d = new Date();
-      return new Date(d.getFullYear(), d.getMonth(), 1);
-    }),
-    [view, setView] = useState("Calendar");
-  const [calendarRows, setCalendarRows] = useState(snapshot.data.farmers);
+  const { snapshot, session, save } = useWorkspace();
+  const [params] = useSearchParams();
+  const [month, setMonth] = useState(
+      () => new Date(new Date().getFullYear(), new Date().getMonth(), 1),
+    ),
+    [view, setView] = useState("Calendar"),
+    [season, setSeason] = useState(params.get("seasonId") || ""),
+    [rows, setRows] = useState<Row[]>([]),
+    [edit, setEdit] = useState<Partial<Row> | null>(null),
+    [error, setError] = useState("");
+  const prefix = `${month.getFullYear()}-${String(month.getMonth() + 1).padStart(2, "0")}`;
   useEffect(() => {
     api(
-      "/api/calendar?month=" +
-        `${month.getFullYear()}-${String(month.getMonth() + 1).padStart(2, "0")}`,
+      "/api/operations/calendar?" +
+        new URLSearchParams({ month: prefix, seasonId: season }),
     )
-      .then(setCalendarRows)
-      .catch(() => {});
-  }, [month, snapshot.summary.totalFarmers]);
-  const events = calendarRows
-    .flatMap((f) =>
-      [
-        ["Planting", f.plantingDate],
-        ["Harvest", f.harvestDate],
-      ]
-        .filter(([, date]) => date)
-        .map(([type, date]) => ({
-          id: f.id + "-" + type,
-          farmer: f,
-          type,
-          date: String(date),
-        })),
-    )
-    .sort((a, b) => a.date.localeCompare(b.date));
+      .then(setRows)
+      .catch((e) => setError(e.message));
+  }, [prefix, season, snapshot]);
+  const seasonRecord = snapshot.data.seasons.find((s) => s.id === season),
+    writable = approved(session);
   const days = new Date(month.getFullYear(), month.getMonth() + 1, 0).getDate();
-  const prefix = `${month.getFullYear()}-${String(month.getMonth() + 1).padStart(2, "0")}`;
-  const current = events.filter((e) => e.date.startsWith(prefix));
+  const label = (kind: string, id: any) =>
+    (snapshot.data as any)[kind]?.find((r: Row) => r.id === id)?.name ||
+    id?.slice(0, 12) ||
+    "—";
   return (
     <>
       <PageHeading
         title="Harvest planner"
-        eyebrow="EVERY SEASON, A SHARED PLAN"
-        description="Coordinate planting, prepare for harvest, and keep your chapter one step ahead."
+        eyebrow="PLAN · EXECUTE · RECORD · LEARN"
+        description="An editable season activity plan linked to programmes, farm observations and aggregation warehouses."
+        actions={
+          <>
+            <a
+              className="button"
+              href={
+                "/api/operations/calendar.ics?" +
+                new URLSearchParams({ seasonId: season })
+              }
+            >
+              <Download size={16} />
+              Calendar (.ics)
+            </a>
+            {writable && (
+              <button
+                className="button primary"
+                onClick={() =>
+                  setEdit({
+                    seasonId: season,
+                    programId: seasonRecord?.programId || "",
+                    status: "Planned",
+                    startDate: prefix + "-01",
+                    endDate: prefix + "-01",
+                  })
+                }
+              >
+                <Plus size={16} />
+                Schedule activity
+              </button>
+            )}
+          </>
+        }
       />
       <section className="panel">
         <div className="calendar-toolbar">
@@ -84,18 +117,37 @@ export default function Calendar() {
               Today
             </button>
           </div>
-          <div className="segmented">
-            {["Calendar", "Agenda"].map((v) => (
-              <button
-                key={v}
-                className={view === v ? "active" : ""}
-                onClick={() => setView(v)}
-              >
-                {v}
-              </button>
-            ))}
+          <div className="inline-filters">
+            <select
+              aria-label="Planner season"
+              value={season}
+              onChange={(e) => setSeason(e.target.value)}
+            >
+              <option value="">All seasons</option>
+              {snapshot.data.seasons.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.name}
+                </option>
+              ))}
+            </select>
+            <div className="segmented">
+              {["Calendar", "Agenda"].map((v) => (
+                <button
+                  key={v}
+                  className={view === v ? "active" : ""}
+                  onClick={() => setView(v)}
+                >
+                  {v}
+                </button>
+              ))}
+            </div>
           </div>
         </div>
+        {error && (
+          <p role="alert" className="error-text">
+            {error}
+          </p>
+        )}
         {view === "Calendar" ? (
           <div className="calendar-scroll">
             <div className="calendar-grid">
@@ -105,11 +157,13 @@ export default function Calendar() {
                 </div>
               ))}
               {Array.from({ length: month.getDay() }, (_, i) => (
-                <div className="calendar-day blank" key={"blank" + i} />
+                <div className="calendar-day blank" key={"b" + i} />
               ))}
               {Array.from({ length: days }, (_, i) => {
-                const date = prefix + "-" + String(i + 1).padStart(2, "0");
-                const entries = current.filter((e) => e.date === date);
+                const date = prefix + "-" + String(i + 1).padStart(2, "0"),
+                  events = rows.filter(
+                    (r) => r.startDate <= date && r.endDate >= date,
+                  );
                 return (
                   <div
                     className={
@@ -121,24 +175,32 @@ export default function Calendar() {
                     key={date}
                   >
                     <b>{i + 1}</b>
-                    {entries.slice(0, 3).map((e) => (
-                      <Link
-                        key={e.id}
+                    {events.slice(0, 3).map((r) => (
+                      <button
                         className={
-                          e.type === "Harvest" ? "harvest" : "planting"
+                          "planner-event " +
+                          (r.stage === "Harvest" ? "harvest" : "planting")
                         }
-                        to={"/farmers/" + e.farmer.id}
+                        key={r.id}
+                        onClick={() =>
+                          writable
+                            ? setEdit(r)
+                            : location.assign("/records/harvestTasks/" + r.id)
+                        }
+                        title={r.name + " · " + r.status}
                       >
-                        <span />
-                        {e.farmer.firstName} · {e.type}
-                      </Link>
+                        {r.name}
+                        <small>
+                          {r.stage} · {r.status}
+                        </small>
+                      </button>
                     ))}
-                    {entries.length > 3 && (
+                    {events.length > 3 && (
                       <button
                         className="text-button"
                         onClick={() => setView("Agenda")}
                       >
-                        +{entries.length - 3} more
+                        +{events.length - 3} activities
                       </button>
                     )}
                   </div>
@@ -147,49 +209,133 @@ export default function Calendar() {
             </div>
           </div>
         ) : (
-          <div className="agenda-list">
-            {current.length ? (
-              current.map((e) => (
-                <Link to={"/farmers/" + e.farmer.id} key={e.id}>
-                  <span className="agenda-date">
-                    <b>{e.date.slice(-2)}</b>
-                    {month.toLocaleDateString("en-NG", { month: "short" })}
-                  </span>
-                  <span>
-                    <strong>{names(e.farmer)}</strong>
-                    <small>
-                      {e.farmer.state} · {format(e.farmer.farmSize)} ha ·{" "}
-                      {e.farmer.crop}
-                    </small>
-                  </span>
-                  <Badge tone={e.type === "Harvest" ? "gold" : "green"}>
-                    {e.type}
-                  </Badge>
-                </Link>
-              ))
-            ) : (
-              <Empty
-                title="No dates recorded this month"
-                description="Add planting and expected harvest dates to farmer profiles."
-              />
-            )}
-          </div>
+          <DataTable
+            rows={rows}
+            columns={[
+              {
+                key: "name",
+                label: "Activity",
+                render: (r) => (
+                  <Link
+                    className="text-link"
+                    to={"/records/harvestTasks/" + r.id}
+                  >
+                    {r.name}
+                  </Link>
+                ),
+              },
+              { key: "stage", label: "Stage" },
+              { key: "startDate", label: "Start" },
+              { key: "endDate", label: "End" },
+              {
+                key: "seasonId",
+                label: "Season",
+                render: (r) => (
+                  <Link to={"/records/seasons/" + r.seasonId}>
+                    {label("seasons", r.seasonId)}
+                  </Link>
+                ),
+              },
+              {
+                key: "warehouseId",
+                label: "Warehouse",
+                render: (r) =>
+                  r.warehouseId ? (
+                    <Link to={"/records/warehouses/" + r.warehouseId}>
+                      {label("warehouses", r.warehouseId)}
+                    </Link>
+                  ) : (
+                    "Not assigned"
+                  ),
+              },
+              {
+                key: "status",
+                label: "Status",
+                render: (r) => <Badge>{r.status}</Badge>,
+              },
+              {
+                key: "edit",
+                label: "Manage",
+                render: (r) =>
+                  writable ? (
+                    <button
+                      className="button small-button"
+                      onClick={() => setEdit(r)}
+                    >
+                      Edit activity
+                    </button>
+                  ) : (
+                    <span>Read only</span>
+                  ),
+              },
+            ]}
+          />
         )}
         <div className="calendar-legend">
           <span>
-            <i />
-            Planting
-          </span>
-          <span>
-            <i />
-            Expected harvest
+            Click an activity to edit dates, stage, officer, status and
+            warehouse.
           </span>
           <small>
-            Dates are recorded by your team; no maturity dates are invented.
+            {writable
+              ? "Approved planner access"
+              : "Read-only; administrator planning approval is required."}
           </small>
         </div>
       </section>
+      {seasonRecord && (
+        <section className="panel detail-panel section-spacing">
+          <h3>{seasonRecord.name}</h3>
+          <p>
+            {seasonRecord.startDate}–{seasonRecord.endDate} ·{" "}
+            {seasonRecord.type} season
+          </p>
+          <div className="record-links">
+            <Link className="button" to={"/records/seasons/" + seasonRecord.id}>
+              Season history →
+            </Link>
+            <Link className="button" to={"/map?seasonId=" + seasonRecord.id}>
+              Map this season →
+            </Link>
+            {seasonRecord.warehouseIds?.map((id: string) => (
+              <Link
+                className="button"
+                key={id}
+                to={"/records/warehouses/" + id}
+              >
+                Storage: {label("warehouses", id)}
+              </Link>
+            ))}
+          </div>
+        </section>
+      )}
+      <div className="info-strip">
+        <CalendarDays size={18} />
+        <span>
+          Earlier planting/harvest dates remain in farmer profiles. Schedule new
+          operational activities explicitly; historical dates are not
+          overwritten or automatically assigned.
+        </span>
+        <Link to="/farmers">Farmer registry →</Link>
+      </div>
       <WeatherOutlook />
+      {edit && (
+        <RecordForm
+          entity="harvestTasks"
+          fields={entityFields.harvestTasks || []}
+          initial={edit}
+          title={edit.id ? "Edit season activity" : "Schedule season activity"}
+          onSave={(r) =>
+            save("harvestTasks", {
+              ...r,
+              ...(edit.id
+                ? { expectedUpdatedAt: edit.updatedAt || edit.createdAt || "" }
+                : {}),
+            })
+          }
+          onClose={() => setEdit(null)}
+        />
+      )}
     </>
   );
 }

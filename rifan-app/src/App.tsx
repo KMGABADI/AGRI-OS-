@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, lazy, Suspense } from "react";
 import {
-  BrowserRouter,
+  BrowserRouter, Navigate,
   Routes,
   Route,
   NavLink,
@@ -44,6 +44,8 @@ import { canEdit } from "./model";
 import Auth from "./pages/Auth";
 import { Modal } from "./components/ui";
 const CardPrint = lazy(() => import("./pages/CardPrint"));
+const Operations=lazy(()=>import('./pages/Operations'));
+const RecordDetail=lazy(()=>import('./pages/RecordDetail'));
 const Dashboard = lazy(() => import("./pages/Dashboard"));
 const Farmers = lazy(() => import("./pages/Farmers"));
 const FarmerProfile = lazy(() => import("./pages/FarmerProfile"));
@@ -65,7 +67,7 @@ const groups = [
   {
     name: "WORKSPACE",
     items: [
-      { name: "Overview", path: "/", icon: LayoutDashboard },
+      { name: "Dashboard", path: "/", icon: LayoutDashboard },
       { name: "Members & fees", path: "/membership", icon: Wallet },
     ],
   },
@@ -81,11 +83,14 @@ const groups = [
       },
       { name: "Harvest planner", path: "/calendar", icon: CalendarDays },
       {
-        name: "Programmes & impact",
-        path: "/monitoring",
+        name: "Programmes",
+        path: "/programs",
         icon: Sprout,
         feature: "enableMonitoring",
       },
+      { name: "Interventions", path: "/interventions", icon: Sprout },
+      {name:"Seasons",path:"/seasons",icon:CalendarDays},
+      {name:"Field validation",path:"/field-validation",icon:ShieldCheck},
       { name: "Farm advisor", path: "/advisor", icon: Bot },
     ],
   },
@@ -111,11 +116,7 @@ const groups = [
     name: "DATA & REPORTS",
     items: [
       { name: "Data hub", path: "/upload", icon: Upload },
-      {
-        name: "Reports & insights",
-        path: "/reports",
-        icon: ChartNoAxesCombined,
-      },
+
       { name: "Connections", path: "/connections", icon: ArrowUpRight },
     ],
   },
@@ -170,6 +171,11 @@ export default function App() {
           />
           <Route element={<Shell />}>
             <Route index element={<Dashboard />} />
+            <Route path="records/:entity/:id" element={<RecordDetail/>}/>
+            <Route path="interventions" element={<Operations entity="interventions"/>}/>
+            <Route path="seasons" element={<Operations entity="seasons"/>}/>
+            <Route path="field-validation" element={<Operations entity="fieldValidations"/>}/>
+            <Route path="farm-locations" element={<Operations entity="farmLocations"/>}/>
             <Route path="farmers" element={<Farmers />} />
             <Route path="farmers/:id" element={<FarmerProfile />} />
             <Route path="membership" element={<Membership />} />
@@ -184,12 +190,12 @@ export default function App() {
             />
             <Route
               path="monitoring"
-              element={<EntityPage entity="interventions" />}
+              element={<Navigate to="/interventions" replace />}
             />
             <Route path="map" element={<MapPage />} />
             <Route path="calendar" element={<Calendar />} />
             <Route path="upload" element={<DataHub />} />
-            <Route path="reports" element={<Reports />} />
+            <Route path="reports" element={<Navigate to="/?view=reports" replace />} />
             <Route path="connections" element={<Connections />} />
             <Route path="food-bank" element={<FoodBank />} />
             <Route path="advisor" element={<Advisor />} />

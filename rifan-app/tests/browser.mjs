@@ -21,18 +21,18 @@ try {
     .getByRole("button", { name: "Explore the demo workspace" })
     .click();
   await page
-    .getByRole("heading", { name: "Growing stronger, together." })
+    .getByRole("heading", { name: "Dashboard." })
     .waitFor();
   const routes = [
     ["/farmers", "Farmer registry."],
     ["/membership", "Members & fees."],
     ["/orgs", "Cooperatives & partners."],
     ["/warehouses", "Warehouses."],
-    ["/monitoring", "Programmes & impact."],
+    ["/monitoring", "Interventions."],
     ["/programs", "Programmes."],
     ["/calendar", "Harvest planner."],
     ["/upload", "Data hub."],
-    ["/reports", "Reports & insights."],
+    ["/reports", "Dashboard."],
     ["/connections", "Connections."],
     ["/food-bank", "Food bank."],
     ["/advisor", "Farm advisor."],
@@ -141,7 +141,7 @@ try {
   console.log("PASS browser CSV mapping, validation, archive and commit");
   await page.goto(origin);
   await page
-    .getByRole("heading", { name: "Growing stronger, together." })
+    .getByRole("heading", { name: "Dashboard." })
     .waitFor();
   await page.screenshot({
     path: "/tmp/rifan-desktop-tested.png",
@@ -150,7 +150,7 @@ try {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.reload();
   await page
-    .getByRole("heading", { name: "Growing stronger, together." })
+    .getByRole("heading", { name: "Dashboard." })
     .waitFor();
   assert.ok(
     await page.evaluate(

@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Link } from "react-router-dom";
+import { Link,useNavigate } from "react-router-dom";
 import {
   Plus,
   Pencil,
@@ -58,7 +58,7 @@ const configs: Record<
         ),
       },
       { key: "region", label: "Region" },
-      { key: "states", label: "Coverage" },
+      { key: "states", label: "Coverage", render:r=>Array.isArray(r.states)?r.states.join(", "):r.states||"—" },
       { key: "contactPerson", label: "Contact person" },
       { key: "contactPhone", label: "Phone" },
       {
@@ -172,6 +172,7 @@ const configs: Record<
 };
 export default function EntityPage({ entity }: { entity: Entity }) {
   const { snapshot, session, save, remove } = useWorkspace();
+  const navigate=useNavigate();
   const config = configs[entity];
   const rows = snapshot.data[entity];
   const [query, setQuery] = useState(""),
@@ -330,7 +331,7 @@ export default function EntityPage({ entity }: { entity: Entity }) {
           />
           <span className="muted small-text">{filtered.length} records</span>
         </div>
-        <DataTable rows={filtered} columns={columns} />
+        <DataTable rows={filtered} columns={columns} onRow={r=>navigate("/records/"+entity+"/"+r.id)} />
       </section>
       {entity === "warehouses" && (
         <section className="panel section-spacing">

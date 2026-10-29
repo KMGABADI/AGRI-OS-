@@ -36,6 +36,7 @@ import {
   type Row,
   type Entity,
 } from "../model";
+import HistoryPanel from "../components/operations/HistoryPanel";
 import MemberCard from "../components/MemberCard";
 import { printCards, exportCards } from "../lib/id-cards";
 import { memberPDF } from "../lib/export";
@@ -248,6 +249,7 @@ export default function FarmerProfile() {
           "Resources",
           "Documents",
           "Membership & finance",
+          "Participation & location history",
         ].map((t) => (
           <button
             key={t}
@@ -287,6 +289,9 @@ export default function FarmerProfile() {
           </div>
           <MemberCard farmer={farmer} logo={snapshot.settings.logo} />
         </section>
+      )}
+      {tab === "Participation & location history" && (
+        <HistoryPanel entity="farmers" id={farmer.id} />
       )}
       {tab === "Overview" && (
         <div className="detail-grid">
@@ -399,7 +404,7 @@ export default function FarmerProfile() {
                   <h3>{tab}</h3>
                   <p>Recorded support and inputs for this farmer.</p>
                 </div>
-                {canEdit(session.role, entity) && (
+                {entity === "resources" && canEdit(session.role, entity) && (
                   <button
                     className="button primary"
                     onClick={() =>
@@ -545,6 +550,37 @@ export default function FarmerProfile() {
                       </button>
                     </div>
                   ) : null,
+              },
+            ]}
+          />
+        </section>
+      )}
+      {tab === "Membership & finance" && (
+        <section className="panel section-spacing">
+          <div className="panel-heading">
+            <h3>Payment records</h3>
+          </div>
+          <DataTable
+            rows={snapshot.data.payments.filter(
+              (p) => p.farmerId === farmer.id,
+            )}
+            columns={[
+              { key: "reference", label: "Reference" },
+              { key: "type", label: "Fee type" },
+              {
+                key: "amount",
+                label: "Amount",
+                render: (r) => money(r.amount),
+              },
+              {
+                key: "provider",
+                label: "Source",
+                render: (r) => r.provider || "Manual",
+              },
+              {
+                key: "status",
+                label: "Status",
+                render: (r) => <Badge>{r.status}</Badge>,
               },
             ]}
           />

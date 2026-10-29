@@ -45,3 +45,5 @@ The original AGRI-OS source is preserved outside `rifan-app/` as a reference. Re
 The imported farmer database, uploaded source files, credentials, dependencies, and build outputs are excluded from Git. The private database prepared in the cloud environment must be backed up and transferred securely to persistent hosting storage; cloning this repository alone does not include the imported farmer records.
 
 RIFAN Connect requires a Node.js server and persistent SQLite storage. GitHub Pages cannot run its backend or database. Publishing this repository is separate from deploying a live website. Google integrations need OAuth configuration; the future public farmer website and online payment collection remain disabled pending their launch configuration.
+
+See [connected operations and security configuration](rifan-app/docs/OPERATIONS.md) for Dashboard, cohorts, planner, history, OTP and Paystack setup.

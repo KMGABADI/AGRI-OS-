@@ -13,6 +13,7 @@ import { names } from "../model";
 import { NIGERIA_STATES } from "../lib/nigeriaData";
 import { COUNTRIES_REGIONS } from "../lib/crossBorderData";
 import { useWorkspace } from "../lib/workspace";
+import FarmerPicker from "./operations/FarmerPicker";
 export function Badge({
   children,
   tone,
@@ -384,7 +385,21 @@ export function RecordForm({
         : key === "state"
           ? { lga: "" }
           : {}),
-      ...(key === "organizationId" ? { programId: "" } : {}),
+      ...(key === "organizationId"
+        ? {
+            programId: "",
+            seasonId: "",
+            interventionId: "",
+            warehouseId: "",
+            locationId: "",
+          }
+        : {}),
+      ...(key === "programId"
+        ? { seasonId: "", interventionId: "", locationId: "", warehouseId: "" }
+        : {}),
+      ...(key === "seasonId"
+        ? { interventionId: "", locationId: "", warehouseId: "" }
+        : {}),
     }));
   const field = (f: Field) => {
     let options: { value: string; label: string }[] = (f.options || []).map(
@@ -395,6 +410,9 @@ export function RecordForm({
       programId: "programs",
       farmerId: "farmers",
       warehouseId: "warehouses",
+      seasonId: "seasons",
+      interventionId: "interventions",
+      locationId: "farmLocations",
     };
     if (refs[f.key])
       options = snapshot.data[refs[f.key]]
@@ -405,14 +423,92 @@ export function RecordForm({
             r.organizationId === values.organizationId,
         )
         .map((r) => ({ value: r.id, label: r.name || names(r) }));
-    if (f.key === "state" && entity === "farmers")
+    if (
+      refs[f.key] &&
+      ["seasonId", "interventionId", "locationId", "warehouseId"].includes(
+        f.key,
+      )
+    )
+      options = options.filter((o) => {
+        const r = snapshot.data[refs[f.key]].find((r) => r.id === o.value)!;
+        return (
+          (f.key !== "seasonId" ||
+            !values.programId ||
+            r.programId === values.programId) &&
+          (f.key !== "interventionId" ||
+            (!r.farmerId &&
+              (!values.programId || r.programId === values.programId) &&
+              (!values.seasonId || r.seasonId === values.seasonId))) &&
+          (f.key !== "locationId" ||
+            ((!values.farmerId || r.farmerId === values.farmerId) &&
+              (!values.seasonId || r.seasonId === values.seasonId))) &&
+          (f.key !== "warehouseId" ||
+            !values.seasonId ||
+            !snapshot.data.seasons.find((s) => s.id === values.seasonId)
+              ?.warehouseIds?.length ||
+            snapshot.data.seasons
+              .find((s) => s.id === values.seasonId)
+              ?.warehouseIds.includes(r.id))
+        );
+      });
+    if (
+      f.key === "state" &&
+      ["farmers", "farmLocations", "fieldValidations"].includes(entity)
+    )
       options = Object.keys(
         COUNTRIES_REGIONS[values.country || "Nigeria"] || NIGERIA_STATES,
       ).map((s) => ({ value: s, label: s }));
-    if (f.key === "lga" && entity === "farmers")
+    if (
+      f.key === "lga" &&
+      ["farmers", "farmLocations", "fieldValidations"].includes(entity)
+    )
       options = (
         COUNTRIES_REGIONS[values.country || "Nigeria"]?.[values.state] || []
       ).map((s) => ({ value: s, label: s }));
+    if (f.type === "multiselect") {
+      const selected = Array.isArray(values[f.key])
+        ? values[f.key]
+        : String(values[f.key] || "")
+            .split(",")
+            .map((v) => v.trim())
+            .filter(Boolean);
+      const list =
+        f.key === "states"
+          ? Object.keys(NIGERIA_STATES).map((name) => ({
+              value: name,
+              label: name,
+            }))
+          : f.key === "warehouseIds"
+            ? snapshot.data.warehouses.map((w) => ({
+                value: w.id,
+                label: w.name,
+              }))
+            : options;
+      return (
+        <fieldset className="field full checkbox-fieldset" key={f.key}>
+          <legend>{f.label}</legend>
+          <div className="checkbox-grid">
+            {list.map((o) => (
+              <label key={o.value}>
+                <input
+                  type="checkbox"
+                  checked={selected.includes(o.value)}
+                  onChange={(e) =>
+                    set(
+                      f.key,
+                      e.target.checked
+                        ? [...selected, o.value]
+                        : selected.filter((v: string) => v !== o.value),
+                    )
+                  }
+                />
+                <span>{o.label}</span>
+              </label>
+            ))}
+          </div>
+        </fieldset>
+      );
+    }
     const id = "field-" + f.key;
     const common = {
       id,
@@ -435,7 +531,14 @@ export function RecordForm({
           {f.label}
           {f.required && <b> *</b>}
         </span>
-        {f.type === "checkbox" ? (
+        {f.key === "farmerId" ? (
+          <FarmerPicker
+            id={id}
+            value={values.farmerId || ""}
+            onChange={(v) => set("farmerId", v)}
+            required={f.required}
+          />
+        ) : f.type === "checkbox" ? (
           <input
             id={id}
             type="checkbox"
@@ -510,6 +613,59 @@ export function RecordForm({
           </div>
         )}
         {grouped && <h3 className="form-section-title">{groupNames[step]}</h3>}
+        {["farmLocations", "fieldValidations"].includes(entity) && (
+          <div className="field-capture-toolbar">
+            <button
+              type="button"
+              className="button"
+              onClick={() => {
+                if (!navigator.geolocation) {
+                  setError("GPS capture is unavailable on this device");
+                  return;
+                }
+                navigator.geolocation.getCurrentPosition(
+                  (position) =>
+                    setValues((v) => ({
+                      ...v,
+                      latitude: position.coords.latitude,
+                      longitude: position.coords.longitude,
+                      gpsAccuracy: position.coords.accuracy,
+                      captureMethod: "Device GPS",
+                    })),
+                  (e) => setError(e.message),
+                  { enableHighAccuracy: true, timeout: 15000 },
+                );
+              }}
+            >
+              Capture device GPS
+            </button>
+            <label className="button">
+              Upload surveyed boundary
+              <input
+                className="visually-hidden"
+                type="file"
+                accept=".geojson,.json,.kml,.gpx,.zip"
+                onChange={async (e) => {
+                  if (e.target.files?.[0])
+                    try {
+                      const { parseBoundary } = await import("../lib/geodata");
+                      setValues((v) => ({ ...v, farmBoundary: null }));
+                      const boundary = await parseBoundary(e.target.files[0]);
+                      setValues((v) => ({ ...v, farmBoundary: boundary }));
+                    } catch (err: any) {
+                      setError(err.message);
+                    }
+                }}
+              />
+            </label>
+            {values.farmBoundary && <Badge>Boundary attached</Badge>}
+            {values.gpsAccuracy && (
+              <small>
+                GPS accuracy: {Math.round(values.gpsAccuracy)} metres
+              </small>
+            )}
+          </div>
+        )}
         <div className="form-grid">{visible.map(field)}</div>
         {error && (
           <p className="error-text" role="alert">

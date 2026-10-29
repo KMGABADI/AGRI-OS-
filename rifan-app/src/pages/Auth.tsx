@@ -16,6 +16,8 @@ export default function Auth({ onLogin }: { onLogin: (s: Session) => void }) {
     [mode, setMode] = useState("login"),
     [error, setError] = useState(""),
     [pending, setPending] = useState(false);
+  const [challenge, setChallenge] = useState(""),
+    [otp, setOtp] = useState("");
   useEffect(() => {
     api("/api/auth/status")
       .then(setStatus)
@@ -101,12 +103,21 @@ export default function Auth({ onLogin }: { onLogin: (s: Session) => void }) {
               setError("");
               const values = Object.fromEntries(new FormData(e.currentTarget));
               try {
-                onLogin(
-                  await api(`/api/auth/${mode}`, {
+                const result = await api(
+                  challenge ? "/api/auth/otp/verify" : `/api/auth/${mode}`,
+                  {
                     method: "POST",
-                    body: JSON.stringify(values),
-                  }),
+                    body: JSON.stringify(
+                      challenge
+                        ? { challengeId: challenge, code: otp }
+                        : values,
+                    ),
+                  },
                 );
+                if (result.requiresOtp) {
+                  setChallenge(result.challengeId);
+                  setError("");
+                } else onLogin(result);
               } catch (e: any) {
                 setError(e.message);
               } finally {
@@ -120,33 +131,62 @@ export default function Auth({ onLogin }: { onLogin: (s: Session) => void }) {
                 <input name="name" autoComplete="name" required minLength={2} />
               </label>
             )}
-            <label className="field">
-              <span>Email address</span>
-              <input
-                name="email"
-                type="email"
-                placeholder="you@organization.ng"
-                autoComplete="username"
-                required
-              />
-            </label>
-            <label className="field">
-              <span>Password</span>
-              <input
-                name="password"
-                type="password"
-                placeholder={
-                  mode === "setup"
-                    ? "At least 12 characters"
-                    : "Enter your password"
-                }
-                autoComplete={
-                  mode === "setup" ? "new-password" : "current-password"
-                }
-                minLength={mode === "setup" ? 12 : 1}
-                required
-              />
-            </label>
+            <div hidden={!!challenge}>
+              <label className="field">
+                <span>Email address</span>
+                <input
+                  name="email"
+                  type="email"
+                  placeholder="you@organization.ng"
+                  autoComplete="username"
+                  required={!challenge}
+                />
+              </label>
+              <label className="field">
+                <span>Password</span>
+                <input
+                  name="password"
+                  type="password"
+                  placeholder={
+                    mode === "setup"
+                      ? "At least 12 characters"
+                      : "Enter your password"
+                  }
+                  autoComplete={
+                    mode === "setup" ? "new-password" : "current-password"
+                  }
+                  minLength={mode === "setup" ? 12 : 1}
+                  required={!challenge}
+                />
+              </label>
+            </div>
+            {challenge && (
+              <label className="field">
+                <span>Verification code sent to your account email</span>
+                <input
+                  aria-label="Email verification code"
+                  inputMode="numeric"
+                  autoComplete="one-time-code"
+                  pattern="[0-9]{6}"
+                  maxLength={6}
+                  required
+                  value={otp}
+                  onChange={(e) => setOtp(e.target.value)}
+                />
+                <small>Expires in five minutes. Never share your OTP.</small>
+                <button
+                  type="button"
+                  className="text-button"
+                  onClick={() => {
+                    setChallenge("");
+                    setOtp("");
+                    setError("");
+                  }}
+                >
+                  Return to password sign-in
+                </button>
+              </label>
+            )}
             {error && (
               <p className="error-text" role="alert">
                 {error}
@@ -155,9 +195,11 @@ export default function Auth({ onLogin }: { onLogin: (s: Session) => void }) {
             <button className="button primary auth-submit" disabled={pending}>
               {pending
                 ? "Please wait…"
-                : mode === "setup"
-                  ? "Create workspace"
-                  : "Sign in to workspace"}
+                : challenge
+                  ? "Verify & sign in"
+                  : mode === "setup"
+                    ? "Create workspace"
+                    : "Sign in to workspace"}
               <ArrowRight size={18} />
             </button>
           </form>

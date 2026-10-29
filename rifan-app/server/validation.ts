@@ -102,6 +102,8 @@ export function validate(entity: Entity, input: any): Row {
     "startDate",
     "endDate",
     "dueDate",
+    "validationDate",
+    "observedAt",
   ])
     if (out[key]) {
       if (
@@ -164,6 +166,17 @@ export function validate(entity: Entity, input: any): Row {
       )
         throw new Error(`${k} must be non-negative`);
   }
+  if (entity === "organizations" && out.states) {
+    if (typeof out.states === "string")
+      out.states = out.states
+        .split(",")
+        .map((v: string) => v.trim())
+        .filter(Boolean);
+    if (!Array.isArray(out.states))
+      throw new Error("Select organization states");
+  }
+  if (entity === "interventions" && out.farmerId && !input.createdAt) {
+  } // Legacy deliveries remain readable; new assignment uses cohort endpoints.
   if (entity === "templates") {
     try {
       const m = JSON.parse(out.mapping);

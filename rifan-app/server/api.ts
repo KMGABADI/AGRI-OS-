@@ -23,6 +23,25 @@ import {
 import { openDatabase, seedDemo } from "./database";
 import { normalizeInput, suggestMapping } from "../src/lib/importing";
 import { validate } from "./validation";
+import {
+  registerOperations,
+  validateLinks,
+  canPlan,
+  validateBoundary,
+} from "./features/operations";
+import { createSecurity, type Mailer } from "./features/security";
+import {
+  createPaystack,
+  type PaymentGateway,
+  paymentState,
+} from "./features/paystack";
+import {
+  primaryScope,
+  relationshipScope,
+  farmerScopeSql,
+} from "./features/policy";
+import { seedOperationsDemo } from "./features/demo";
+import { intelligenceFor } from "./features/intelligence";
 
 type R = Request & { actor: Session };
 function fail(status: number, message: string): never {
@@ -36,6 +55,8 @@ const publicUser = (u: any) => ({
   email: u.email,
   role: u.role,
   ...JSON.parse(u.scope || "{}"),
+  twoFactorEnabled: !!u.twofa_enabled,
+  twoFactorRequired: !!u.twofa_required,
 });
 const safe =
   (fn: (req: R, res: Response) => any) =>
@@ -48,6 +69,9 @@ const tokenHash = (s: string) => createHash("sha256").update(s).digest("hex");
 export function createApi(
   options: {
     filename?: string;
+    mailer?: Mailer;
+    paystack?: PaymentGateway;
+    paystackSecret?: string;
     demo?: boolean;
     sheetsAdapter?: {
       read: (url: string) => Promise<any[][]>;
@@ -77,10 +101,16 @@ export function createApi(
     options.demo ??
     (process.env.NODE_ENV !== "production" ||
       process.env.ENABLE_DEMO === "true");
-  if (demoEnabled) seedDemo(s);
+  if (demoEnabled) {
+    seedDemo(s);
+    seedOperationsDemo(s);
+  }
   const app = express();
   app.disable("x-powered-by");
   if (process.env.RENDER === "true") app.set("trust proxy", 1);
+  const security = createSecurity(s, options.mailer);
+  const payments = createPaystack(s, options.paystack, options.paystackSecret);
+  payments.mountWebhook(app);
   app.use(express.json({ limit: "8mb" }));
   app.use((req, res, next) => {
     res.setHeader("X-Content-Type-Options", "nosniff");
@@ -175,22 +205,48 @@ export function createApi(
       actor = { ...actor, ...publicUser(user) };
     }
     (req as R).actor = actor;
-    next();
+    s.withActor(actor, () => next());
   };
   const allowed = (actor: Session, entity: Entity, row: Row): boolean => {
     if (["Super Admin", "Admin"].includes(actor.role)) return true;
     if (entity === "chats")
       return row.userId === actor.id && Array.isArray(row.messages);
     if (entity === "farmers")
-      return (
-        (!actor.organizationId ||
-          row.organizationId === actor.organizationId) &&
-        (!actor.states?.length || actor.states.includes(row.state)) &&
-        (!actor.lgas?.length || actor.lgas.includes(row.lga))
-      );
+      return primaryScope(actor, row) || relationshipScope(s, actor, row.id);
+    if (
+      [
+        "participations",
+        "farmLocations",
+        "fieldValidations",
+        "harvestTasks",
+      ].includes(entity)
+    ) {
+      if (
+        actor.organizationId &&
+        row.organizationId &&
+        row.organizationId !== actor.organizationId
+      )
+        return false;
+      if (
+        actor.states?.length &&
+        row.state &&
+        !actor.states.includes(row.state)
+      )
+        return false;
+      if (actor.lgas?.length && row.lga && !actor.lgas.includes(row.lga))
+        return false;
+    }
+    if (["seasons", "interventions"].includes(entity) && row.programId) {
+      const parent = s.get(actor.space, "programs", row.programId);
+      if (!parent || !allowed(actor, "programs", parent)) return false;
+    }
     if (
       [
         "interventions",
+        "participations",
+        "farmLocations",
+        "fieldValidations",
+        "harvestTasks",
         "resources",
         "payments",
         "applications",
@@ -220,6 +276,8 @@ export function createApi(
     actor: Session,
     entity: Entity | "users" | "settings",
   ) => {
+    if (entity === "harvestTasks" && !canPlan(actor))
+      fail(403, "Harvest planning requires an approved officer or manager");
     if (!canEdit(actor.role, entity))
       fail(403, "Your role does not allow this action.");
   };
@@ -291,6 +349,7 @@ export function createApi(
     registrationRecordedAt:
       row.registrationRecordedAt || new Date().toISOString(),
   });
+  security.mountPublic(app, issue);
   app.get("/api/health", (_req, res) =>
     res.json({ status: "ok", app: "RIFAN Connect", storage: "sqlite" }),
   );
@@ -379,7 +438,7 @@ export function createApi(
   app.post(
     "/api/auth/login",
     rateLimit,
-    safe((req, res) => {
+    safe(async (req, res) => {
       const { email, password } = req.body;
       const u = s.db
         .prepare("SELECT * FROM users WHERE space='workspace' AND email=?")
@@ -394,6 +453,10 @@ export function createApi(
         )
       )
         fail(401, "Email or password is incorrect");
+      if (security.needs(u)) {
+        res.json(await security.send(u, "login"));
+        return;
+      }
       res.json(
         issue(res, {
           ...publicUser(u),
@@ -519,25 +582,14 @@ export function createApi(
     }),
   );
   app.use("/api", authenticate);
+  security.mountPrivate(app);
   const farmerWhere = (a: Session, filters: any = {}) => {
     const clauses = ["space=?", "entity='farmers'"];
     const args: any[] = [a.space];
     if (!["Super Admin", "Admin"].includes(a.role)) {
-      if (a.organizationId) {
-        clauses.push("json_extract(data,'$.organizationId')=?");
-        args.push(a.organizationId);
-      }
-      for (const [key, values] of [
-        ["state", a.states],
-        ["lga", a.lgas],
-      ] as [string, string[] | undefined][]) {
-        if (values?.length) {
-          clauses.push(
-            `json_extract(data,'$.${key}') IN (${values.map(() => "?").join(",")})`,
-          );
-          args.push(...values);
-        }
-      }
+      const scope = farmerScopeSql(a);
+      clauses.push(scope.clause);
+      args.push(...scope.args);
     }
     for (const key of [
       "state",
@@ -573,6 +625,9 @@ export function createApi(
       }
       return r;
     });
+  const features = { app, s, allowed, requireWrite, farmerWhere };
+  registerOperations(features);
+  payments.mountPrivate(features);
   const summaries = new Map<string, { version: string; value: any }>();
   const summaryFor = (actor: Session, filters: any = {}) => {
     const { where, args } = farmerWhere(actor, filters);
@@ -746,7 +801,22 @@ export function createApi(
           e,
           e === "farmers"
             ? farmerRows
-            : s.all(a.space, e).filter((r) => allowed(a, e, r)),
+            : [
+                  "participations",
+                  "farmLocations",
+                  "fieldValidations",
+                  "harvestTasks",
+                ].includes(e)
+              ? (
+                  s.db
+                    .prepare(
+                      "SELECT data FROM records WHERE space=? AND entity=? ORDER BY rowid DESC LIMIT 1000",
+                    )
+                    .all(a.space, e) as any[]
+                )
+                  .map((r) => JSON.parse(r.data))
+                  .filter((r) => allowed(a, e, r))
+              : s.all(a.space, e).filter((r) => allowed(a, e, r)),
         ]),
       );
       const summary = summaryFor(a);
@@ -863,6 +933,8 @@ export function createApi(
           (!Number.isFinite(Number(updates[k])) || Number(updates[k]) < 0)
         )
           fail(400, "Fees must be non-negative amounts");
+      if (updates.requireTwoFactor && !security.configured())
+        fail(503, "Configure branded OTP email delivery before requiring 2FA");
       const settings = { ...s.settings(req.actor.space), ...updates };
       s.transaction(() => {
         s.db
@@ -928,7 +1000,13 @@ export function createApi(
         !s.get(req.actor.space, "organizations", organizationId)
       )
         fail(400, "Organization scope does not exist");
-      const scope = { organizationId, states, lgas, warehouseIds };
+      const scope = {
+        organizationId,
+        states,
+        lgas,
+        warehouseIds,
+        plannerApproved: req.body.plannerApproved === true,
+      };
       s.transaction(() => {
         s.db
           .prepare(
@@ -988,10 +1066,13 @@ export function createApi(
       )
         fail(400, "Organization scope does not exist");
       const scope = Object.fromEntries(
-        ["organizationId", "states", "lgas", "warehouseIds"].map((k) => [
-          k,
-          req.body[k] ?? JSON.parse(u.scope || "{}")[k],
-        ]),
+        [
+          "organizationId",
+          "states",
+          "lgas",
+          "warehouseIds",
+          "plannerApproved",
+        ].map((k) => [k, req.body[k] ?? JSON.parse(u.scope || "{}")[k]]),
       );
       s.transaction(() => {
         s.db
@@ -1140,32 +1221,7 @@ export function createApi(
           verifiedBy: req.actor.id,
           verifiedAt: new Date().toISOString(),
         });
-        const f = s.get(req.actor.space, "farmers", row.farmerId)!;
-        const rows = s
-          .all(req.actor.space, "payments")
-          .filter((p) => p.farmerId === f.id && p.status === "Verified");
-        const settings = s.settings(req.actor.space);
-        const registration = rows
-          .filter((p) => p.type === "Registration")
-          .reduce((a, p) => a + p.amount, 0);
-        const membership = rows
-          .filter(
-            (p) =>
-              p.type === "Membership" &&
-              p.period === String(new Date().getFullYear()),
-          )
-          .reduce((a, p) => a + p.amount, 0);
-        const paid =
-          Number(settings.registrationFee) > 0 &&
-          Number(settings.membershipFee) > 0 &&
-          registration >= Number(settings.registrationFee) &&
-          membership >= Number(settings.membershipFee);
-        s.put(req.actor.space, "farmers", {
-          ...f,
-          paymentStatus: paid ? "Paid" : rows.length ? "Part paid" : "Unpaid",
-          membershipStatus:
-            paid && f.kycComplete ? "Active" : "Awaiting review",
-        });
+        paymentState(s, req.actor.space, row.farmerId);
         s.audit(
           req.actor,
           "PAYMENT_" + status.toUpperCase(),
@@ -1864,7 +1920,10 @@ export function createApi(
         })),
         config: {
           systemInstruction:
-            "You are the RIFAN agricultural extension advisor for Nigerian rice farmers. Provide practical, locally relevant rice, irrigation, soil, seed, pest, harvest and storage advice. State uncertainty, do not fabricate locations or prices. Ask for location, season and crop stage when needed. This is advisory guidance, not a substitute for a field agronomist.",
+            "You are the RIFAN agricultural extension advisor for Nigerian rice farmers. Provide practical, locally relevant rice, irrigation, soil, seed, pest, harvest and storage advice. State uncertainty, do not fabricate locations or prices. Ask for location, season and crop stage when needed. This is advisory guidance, not a substitute for a field agronomist. Use only this recorded aggregate evidence for claims about the workspace; do not infer individual identities or missing measurements: " +
+            JSON.stringify(
+              intelligenceFor(features, req.actor, req.body.filters || {}),
+            ),
         },
       });
       const row = {
@@ -2517,9 +2576,14 @@ export function createApi(
       const entity = req.params.entity as Entity;
       if (
         !ENTITIES.includes(entity) ||
-        ["imports", "movements", "chats", "payments", "applications"].includes(
-          entity,
-        )
+        [
+          "imports",
+          "movements",
+          "chats",
+          "payments",
+          "applications",
+          "participations",
+        ].includes(entity)
       )
         fail(404, "Unknown or immutable collection");
       requireWrite(req.actor, entity);
@@ -2529,15 +2593,26 @@ export function createApi(
         createdAt: new Date().toISOString(),
       });
       refCheck(req.actor, entity, row);
+      validateLinks(features, req.actor, entity, row);
       if (!allowed(req.actor, entity, row))
         fail(403, "Record is outside your assigned scope");
       if (entity === "farmers") {
+        if (row.farmBoundary) validateBoundary(row.farmBoundary);
         if (duplicate(req.actor.space, row))
           fail(
             409,
             "A member with this phone, member ID or identity already exists",
           );
         row = cleanFarmer(row);
+      }
+      if (entity === "interventions" && req.body.farmerId)
+        fail(
+          400,
+          "Create an intervention under its programme, then assign a beneficiary cohort in bulk",
+        );
+      if (["farmLocations", "fieldValidations"].includes(entity)) {
+        row.recordedBy = req.actor.id;
+        row.recordedAt = new Date().toISOString();
       }
       if (entity === "warehouses") row.currentInventory = 0;
       if (entity === "alerts") row.status = "Open";
@@ -2560,15 +2635,38 @@ export function createApi(
       const entity = req.params.entity as Entity;
       if (
         !ENTITIES.includes(entity) ||
-        ["imports", "movements", "chats", "payments", "applications"].includes(
-          entity,
-        )
+        [
+          "imports",
+          "movements",
+          "chats",
+          "payments",
+          "applications",
+          "participations",
+        ].includes(entity)
       )
         fail(404, "Unknown or immutable collection");
       requireWrite(req.actor, entity);
       const old = s.get(req.actor.space, entity, req.params.id);
       if (!old || !allowed(req.actor, entity, old))
         fail(404, "Record not found");
+      if (entity === "farmLocations")
+        fail(
+          409,
+          "Historical farm observations are immutable. Create a new observation linked to the activity.",
+        );
+      if (entity === "fieldValidations" && old.status === "Verified")
+        fail(
+          409,
+          "Approved field evidence is immutable. Submit a new validation.",
+        );
+      if (
+        req.body.expectedUpdatedAt !== undefined &&
+        req.body.expectedUpdatedAt !== (old.updatedAt || old.createdAt || "")
+      )
+        fail(
+          409,
+          "This record changed since it was opened. Reload before editing.",
+        );
       const row = validate(entity, {
         ...old,
         ...req.body,
@@ -2576,8 +2674,11 @@ export function createApi(
         updatedAt: new Date().toISOString(),
       });
       refCheck(req.actor, entity, row);
+      validateLinks(features, req.actor, entity, row);
       if (!allowed(req.actor, entity, row))
         fail(403, "Updated record is outside your assigned scope");
+      if (entity === "farmers" && row.farmBoundary)
+        validateBoundary(row.farmBoundary);
       if (entity === "farmers" && duplicate(req.actor.space, row, old.id))
         fail(409, "Another member already has this phone or identity");
       if (entity === "warehouses") {
@@ -2608,9 +2709,14 @@ export function createApi(
       const entity = req.params.entity as Entity;
       if (
         !ENTITIES.includes(entity) ||
-        ["imports", "movements", "chats", "payments", "applications"].includes(
-          entity,
-        )
+        [
+          "imports",
+          "movements",
+          "chats",
+          "payments",
+          "applications",
+          "participations",
+        ].includes(entity)
       )
         fail(404, "Unknown or immutable collection");
       requireWrite(req.actor, entity);
@@ -2619,6 +2725,41 @@ export function createApi(
       const row = s.get(req.actor.space, entity, req.params.id);
       if (!row || !allowed(req.actor, entity, row))
         fail(404, "Record not found");
+      if (["farmLocations", "fieldValidations"].includes(entity))
+        fail(
+          409,
+          "Historical evidence cannot be deleted; record a superseding observation",
+        );
+      for (const child of [
+        "participations",
+        "farmLocations",
+        "fieldValidations",
+        "harvestTasks",
+        "seasons",
+      ] as Entity[]) {
+        const key = (
+          {
+            farmers: "farmerId",
+            programs: "programId",
+            interventions: "interventionId",
+            seasons: "seasonId",
+            warehouses: "warehouseId",
+            organizations: "organizationId",
+          } as any
+        )[entity];
+        if (
+          key &&
+          s.db
+            .prepare(
+              `SELECT id FROM records WHERE space=? AND entity=? AND json_extract(data,'$.${key}')=? LIMIT 1`,
+            )
+            .get(req.actor.space, child, row.id)
+        )
+          fail(
+            409,
+            "This record has linked operational history. Archive it instead of deleting.",
+          );
+      }
       const refs: Partial<Record<Entity, [Entity, string][]>> = {
         organizations: [
           ["farmers", "organizationId"],

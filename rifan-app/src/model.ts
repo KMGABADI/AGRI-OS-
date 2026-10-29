@@ -24,7 +24,12 @@ export type Entity =
   | "movements"
   | "chats"
   | "applications"
-  | "payments";
+  | "payments"
+  | "seasons"
+  | "participations"
+  | "fieldValidations"
+  | "farmLocations"
+  | "harvestTasks";
 export const ENTITIES: Entity[] = [
   "farmers",
   "organizations",
@@ -41,6 +46,11 @@ export const ENTITIES: Entity[] = [
   "chats",
   "applications",
   "payments",
+  "seasons",
+  "participations",
+  "fieldValidations",
+  "farmLocations",
+  "harvestTasks",
 ];
 export interface Session {
   id: string;
@@ -53,6 +63,7 @@ export interface Session {
   states?: string[];
   lgas?: string[];
   warehouseIds?: string[];
+  plannerApproved?: boolean;
 }
 export interface Snapshot {
   data: Record<Entity, Row[]>;
@@ -74,7 +85,8 @@ export type Field = {
     | "textarea"
     | "checkbox"
     | "email"
-    | "password";
+    | "password"
+    | "multiselect";
   options?: string[];
   required?: boolean;
   group?: string;
@@ -97,7 +109,13 @@ export const canEdit = (role: Role, entity: Entity | "settings" | "users") => {
   if (["settings", "users", "widgets"].includes(entity)) return false;
   if (role === "Manager") return true;
   if (["Field Agent", "Enumerator"].includes(role))
-    return ["farmers", "interventions", "resources"].includes(entity);
+    return [
+      "farmers",
+      "resources",
+      "fieldValidations",
+      "farmLocations",
+      "harvestTasks",
+    ].includes(entity);
   return (
     role === "Data Entry Officer" && ["farmers", "imports"].includes(entity)
   );
@@ -123,6 +141,7 @@ export const DEFAULT_SETTINGS = {
   membershipCycle: "Annual",
   publicRegistrationEnabled: false,
   paymentProvider: "Not configured",
+  requireTwoFactor: false,
 };
 export const farmerFields: Field[] = [
   {
@@ -273,7 +292,7 @@ export const entityFields: Partial<Record<Entity, Field[]>> = {
       options: ["Cooperative", "Anchor", "NGO", "Government", "Programme"],
     },
     { key: "region", label: "Region / state" },
-    { key: "states", label: "Coverage states (comma separated)" },
+    { key: "states", label: "Coverage states", type: "multiselect" },
     { key: "lgas", label: "Coverage LGAs (comma separated)" },
     { key: "contactPerson", label: "Contact person" },
     { key: "contactPhone", label: "Contact phone" },
@@ -333,8 +352,31 @@ export const entityFields: Partial<Record<Entity, Field[]>> = {
   ],
   interventions: [
     { key: "name", label: "Intervention name", required: true },
-    { key: "farmerId", label: "Beneficiary", type: "select", required: true },
-    { key: "programId", label: "Programme", type: "select" },
+    {
+      key: "programId",
+      label: "Parent programme",
+      type: "select",
+      required: true,
+    },
+    { key: "seasonId", label: "Season", type: "select", required: true },
+    { key: "warehouseId", label: "Linked warehouse", type: "select" },
+    {
+      key: "crop",
+      label: "Crop",
+      type: "select",
+      options: [
+        "Rice",
+        "Maize",
+        "Cassava",
+        "Sorghum",
+        "Millet",
+        "Soybean",
+        "Yam",
+        "Vegetables",
+        "Cotton",
+        "Groundnut",
+      ],
+    },
     {
       key: "type",
       label: "Type",
@@ -452,3 +494,153 @@ export const entityFields: Partial<Record<Entity, Field[]>> = {
     { key: "enabled", label: "Visible", type: "checkbox" },
   ],
 };
+
+const cropOptions = [
+  "Rice",
+  "Maize",
+  "Cassava",
+  "Sorghum",
+  "Millet",
+  "Soybean",
+  "Yam",
+  "Vegetables",
+  "Cotton",
+  "Groundnut",
+];
+entityFields.seasons = [
+  { key: "name", label: "Season name", required: true },
+  { key: "organizationId", label: "Organization", type: "select" },
+  { key: "programId", label: "Programme", type: "select", required: true },
+  {
+    key: "type",
+    label: "Season type",
+    type: "select",
+    options: ["Wet", "Dry", "Mixed"],
+  },
+  {
+    key: "year",
+    label: "Year",
+    type: "number",
+    min: 1900,
+    max: 2200,
+    required: true,
+  },
+  { key: "crop", label: "Crop", type: "select", options: cropOptions },
+  { key: "startDate", label: "Start date", type: "date", required: true },
+  { key: "endDate", label: "End date", type: "date", required: true },
+  { key: "warehouseIds", label: "Storage facilities", type: "multiselect" },
+  {
+    key: "status",
+    label: "Status",
+    type: "select",
+    options: ["Planned", "Active", "Completed", "Archived"],
+  },
+  { key: "notes", label: "Notes", type: "textarea" },
+];
+entityFields.fieldValidations = [
+  { key: "farmerId", label: "Farmer", type: "select", required: true },
+  { key: "programId", label: "Programme", type: "select", required: true },
+  { key: "seasonId", label: "Season", type: "select", required: true },
+  { key: "interventionId", label: "Intervention", type: "select" },
+  { key: "state", label: "State", required: true },
+  { key: "lga", label: "LGA", required: true },
+  { key: "address", label: "Farm address" },
+  {
+    key: "crop",
+    label: "Observed crop",
+    type: "select",
+    options: cropOptions,
+    required: true,
+  },
+  { key: "farmSize", label: "Verified area (ha)", type: "number", min: 0 },
+  { key: "latitude", label: "GPS latitude", type: "number", min: -90, max: 90 },
+  {
+    key: "longitude",
+    label: "GPS longitude",
+    type: "number",
+    min: -180,
+    max: 180,
+  },
+  {
+    key: "status",
+    label: "Validation status",
+    type: "select",
+    options: ["Pending", "Verified", "Rejected"],
+    required: true,
+  },
+  {
+    key: "validationDate",
+    label: "Field visit date",
+    type: "date",
+    required: true,
+  },
+  {
+    key: "notes",
+    label: "Evidence / observations",
+    type: "textarea",
+    required: true,
+  },
+];
+entityFields.harvestTasks = [
+  { key: "name", label: "Activity name", required: true },
+  { key: "programId", label: "Programme", type: "select", required: true },
+  { key: "seasonId", label: "Season", type: "select", required: true },
+  { key: "interventionId", label: "Intervention", type: "select" },
+  { key: "farmerId", label: "Farmer (optional)", type: "select" },
+  { key: "locationId", label: "Recorded farm site", type: "select" },
+  { key: "warehouseId", label: "Aggregation warehouse", type: "select" },
+  {
+    key: "stage",
+    label: "Activity stage",
+    type: "select",
+    options: [
+      "Land preparation",
+      "Planting",
+      "Irrigation",
+      "Fertilizer",
+      "Scouting",
+      "Harvest",
+      "Drying",
+      "Storage",
+      "Dispatch",
+    ],
+    required: true,
+  },
+  { key: "startDate", label: "Start date", type: "date", required: true },
+  { key: "endDate", label: "End date", type: "date", required: true },
+  { key: "assignedTo", label: "Assigned officer" },
+  {
+    key: "status",
+    label: "Status",
+    type: "select",
+    options: ["Planned", "In Progress", "Completed", "Cancelled"],
+  },
+  {
+    key: "expectedYield",
+    label: "Expected yield (kg)",
+    type: "number",
+    min: 0,
+  },
+  { key: "actualYield", label: "Actual yield (kg)", type: "number", min: 0 },
+  { key: "notes", label: "Notes", type: "textarea" },
+];
+entityFields.farmLocations = [
+  { key: "farmerId", label: "Farmer", type: "select", required: true },
+  { key: "programId", label: "Programme", type: "select", required: true },
+  { key: "seasonId", label: "Season", type: "select", required: true },
+  { key: "interventionId", label: "Intervention", type: "select" },
+  { key: "state", label: "State", required: true },
+  { key: "lga", label: "LGA", required: true },
+  { key: "address", label: "Farm address" },
+  { key: "crop", label: "Crop", type: "select", options: cropOptions },
+  { key: "farmSize", label: "Area (ha)", type: "number", min: 0 },
+  { key: "latitude", label: "Latitude", type: "number", min: -90, max: 90 },
+  { key: "longitude", label: "Longitude", type: "number", min: -180, max: 180 },
+  {
+    key: "observedAt",
+    label: "Observation date",
+    type: "date",
+    required: true,
+  },
+  { key: "notes", label: "Location / boundary notes", type: "textarea" },
+];

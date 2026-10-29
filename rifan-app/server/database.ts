@@ -1,6 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import {
   DEFAULT_SETTINGS,
@@ -32,6 +33,47 @@ export function openDatabase(filename: string) {
     CREATE INDEX IF NOT EXISTS farmer_state ON records(space,json_extract(data,'$.state')) WHERE entity='farmers';
     CREATE TABLE IF NOT EXISTS integrations (space TEXT NOT NULL, user_id TEXT NOT NULL, access_token TEXT NOT NULL, refresh_token TEXT, expires INTEGER, PRIMARY KEY(space,user_id));
   `);
+  db.exec(`CREATE TABLE IF NOT EXISTS record_history (version INTEGER PRIMARY KEY AUTOINCREMENT, space TEXT NOT NULL, entity TEXT NOT NULL, record_id TEXT NOT NULL, data TEXT NOT NULL, action TEXT NOT NULL, recorded_at TEXT NOT NULL, actor_id TEXT, actor_name TEXT);
+CREATE INDEX IF NOT EXISTS history_record ON record_history(space,entity,record_id,version);
+CREATE TABLE IF NOT EXISTS cohort_jobs(id TEXT PRIMARY KEY,space TEXT NOT NULL,actor_id TEXT NOT NULL,target TEXT NOT NULL,filters TEXT NOT NULL,created TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS cohort_members(job_id TEXT NOT NULL,farmer_id TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'Pending',reason TEXT,PRIMARY KEY(job_id,farmer_id));
+CREATE INDEX IF NOT EXISTS cohort_pending ON cohort_members(job_id,status);
+CREATE INDEX IF NOT EXISTS participation_farmer ON records(space,json_extract(data,'$.farmerId')) WHERE entity='participations';
+CREATE UNIQUE INDEX IF NOT EXISTS participation_unique ON records(space,json_extract(data,'$.farmerId'),json_extract(data,'$.interventionId'),json_extract(data,'$.seasonId')) WHERE entity='participations';
+CREATE INDEX IF NOT EXISTS site_farmer ON records(space,json_extract(data,'$.farmerId')) WHERE entity='farmLocations';
+CREATE INDEX IF NOT EXISTS validation_farmer ON records(space,json_extract(data,'$.farmerId')) WHERE entity='fieldValidations';
+CREATE TABLE IF NOT EXISTS otp_challenges(id TEXT PRIMARY KEY,user_id TEXT NOT NULL,space TEXT NOT NULL,purpose TEXT NOT NULL,hash TEXT NOT NULL,salt TEXT NOT NULL,expires INTEGER NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,created INTEGER NOT NULL);`);
+  const columns = new Set(
+    (db.prepare("PRAGMA table_info(users)").all() as any[]).map((r) => r.name),
+  );
+  for (const column of ["twofa_enabled", "twofa_required"])
+    if (!columns.has(column))
+      db.exec(
+        `ALTER TABLE users ADD COLUMN ${column} INTEGER NOT NULL DEFAULT 0`,
+      );
+  const actors = new AsyncLocalStorage<Session>();
+  const withActor = <T>(actor: Session, callback: () => T) =>
+    actors.run(actor, callback);
+  const history = (
+    space: string,
+    entity: Entity,
+    data: Row,
+    action: string,
+  ) => {
+    const actor = actors.getStore();
+    db.prepare(
+      "INSERT INTO record_history(space,entity,record_id,data,action,recorded_at,actor_id,actor_name) VALUES(?,?,?,?,?,?,?,?)",
+    ).run(
+      space,
+      entity,
+      data.id,
+      JSON.stringify(data),
+      action,
+      new Date().toISOString(),
+      actor?.id || "system",
+      actor?.name || "System",
+    );
+  };
   let revision = 0;
   const version = () =>
     String((db.prepare("PRAGMA data_version").get() as any).data_version) +
@@ -53,6 +95,23 @@ export function openDatabase(filename: string) {
   };
   const put = (space: string, entity: Entity, data: Row) => {
     if (entity === "farmers") revision++;
+    const previous = get(space, entity, data.id);
+    if (
+      previous &&
+      !db
+        .prepare(
+          "SELECT version FROM record_history WHERE space=? AND entity=? AND record_id=? LIMIT 1",
+        )
+        .get(space, entity, data.id)
+    )
+      history(
+        space,
+        entity,
+        previous,
+        "Baseline (earlier revisions unavailable)",
+      );
+    if (!previous || JSON.stringify(previous) !== JSON.stringify(data))
+      history(space, entity, data, previous ? "Updated" : "Created");
     db.prepare(
       "INSERT INTO records(space,entity,id,data) VALUES(?,?,?,?) ON CONFLICT(space,entity,id) DO UPDATE SET data=excluded.data",
     ).run(space, entity, data.id, JSON.stringify(data));
@@ -60,6 +119,8 @@ export function openDatabase(filename: string) {
   };
   const remove = (space: string, entity: Entity, id: string) => {
     if (entity === "farmers") revision++;
+    const previous = get(space, entity, id);
+    if (previous) history(space, entity, previous, "Deleted");
     return db
       .prepare("DELETE FROM records WHERE space=? AND entity=? AND id=?")
       .run(space, entity, id);
@@ -102,7 +163,18 @@ export function openDatabase(filename: string) {
       throw e;
     }
   };
-  return { db, all, get, put, remove, settings, audit, transaction, version };
+  return {
+    db,
+    all,
+    get,
+    put,
+    remove,
+    settings,
+    audit,
+    transaction,
+    version,
+    withActor,
+  };
 }
 export type Store = ReturnType<typeof openDatabase>;
 

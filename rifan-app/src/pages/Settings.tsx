@@ -209,7 +209,7 @@ export default function Settings() {
       {tab === "Modules & dashboard" && (
         <div className="settings-grid">
           <section className="panel detail-panel">
-            <h3>Workspace modules</h3>
+            <h3>Workspace modules</h3><label className="toggle-row"><span>Require email 2FA for private workspace accounts</span><input type="checkbox" checked={!!values.requireTwoFactor} onChange={e=>change('requireTwoFactor',e.target.checked)}/></label><p className="small-text muted">Configure branded email delivery before requiring 2FA. Users can enable optional 2FA in My account; administrators can manage per-user policy in Team & access.</p>
             {[
               ["enableFoodBank", "Food bank & warehouses"],
               ["enableMap", "Farm intelligence map"],

@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import {
   Wallet,
@@ -25,9 +25,24 @@ import {
 import { pdfImage } from "../lib/pdf-image";
 import { pdfFont } from "../lib/pdf-font";
 import { names, money, type Row } from "../model";
+import PaystackCheckout from "../components/operations/PaystackCheckout";
 export default function Membership() {
   const { snapshot, session, refresh, notify } = useWorkspace();
   const [params] = useSearchParams();
+  const [checkout, setCheckout] = useState(false);
+  useEffect(() => {
+    const reference = params.get("reference");
+    if (reference)
+      api(
+        "/api/payments/paystack/" + encodeURIComponent(reference) + "/verify",
+        { method: "POST" },
+      )
+        .then(() => {
+          refresh();
+          notify("Paystack payment verified");
+        })
+        .catch((e) => notify(e.message, true));
+  }, [params]);
   const [tab, setTab] = useState("Payments"),
     [payment, setPayment] = useState(false),
     [query, setQuery] = useState(""),
@@ -70,10 +85,18 @@ export default function Membership() {
         description="A clear view of applications, fee obligations, and verified membership payments."
         actions={
           canRecord && (
-            <button className="button primary" onClick={() => setPayment(true)}>
-              <Plus size={16} />
-              Record payment
-            </button>
+            <>
+              <button className="button" onClick={() => setCheckout(true)}>
+                Pay with Paystack
+              </button>
+              <button
+                className="button primary"
+                onClick={() => setPayment(true)}
+              >
+                <Plus size={16} />
+                Record payment
+              </button>
+            </>
           )
         }
       />
@@ -414,6 +437,12 @@ export default function Membership() {
             not charge a bank account or send money.
           </p>
         </section>
+      )}
+      {checkout && (
+        <PaystackCheckout
+          initialFarmer={params.get("farmer") || ""}
+          onClose={() => setCheckout(false)}
+        />
       )}
       {payment && (
         <PaymentForm

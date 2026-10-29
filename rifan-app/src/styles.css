@@ -3891,3 +3891,17 @@ td,
   cursor: pointer;
   text-decoration: underline;
 }
+/* Readable operational views across desktop and field devices. */
+:root { --ink:#182c20; --muted:#4d5d50; color:#182c20; }
+.muted,.small-text,.field>span,.panel-heading p,.stat-label {color:var(--muted)}
+input::placeholder,textarea::placeholder {color:#59675c;opacity:1}
+.staged-filters {display:grid;grid-template-columns:repeat(auto-fit,minmax(165px,1fr));gap:12px;margin:18px 0}
+.checkbox-grid {display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;max-height:280px;overflow:auto;padding:12px;border:1px solid var(--line);border-radius:8px}
+.checkbox-grid label {display:flex;align-items:center;gap:8px;color:var(--ink)}
+.checkbox-grid input {width:18px;height:18px;accent-color:var(--green)}
+.planner-event {display:block;width:100%;text-align:left;background:#e8efe4;color:#183d24;border:1px solid #b7cab1;border-radius:5px;padding:5px;margin:3px 0;white-space:normal}
+.field-capture-toolbar {display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.alert-card {display:flex;gap:16px;padding:20px;align-items:flex-start}
+.detail-panel {padding:22px}
+button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible {outline:3px solid #9b7620;outline-offset:3px}
+@media(max-width:640px){.staged-filters{grid-template-columns:1fr 1fr}.checkbox-grid{grid-template-columns:1fr}.segmented{flex-wrap:wrap}.alert-card{flex-wrap:wrap}}

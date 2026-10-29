@@ -785,6 +785,7 @@ export default function DataHub() {
           </section>
         </>
       )}
+      {tab==='Review queue'&&reviewBatch&&<div className="heading-actions section-spacing"><a className="button primary" href={'/api/import/failures/'+reviewBatch+'.csv'}><Download size={16}/>Download ALL failed rows and reasons</a><span className="small-text muted">Contains original source values. Authorized reviewers only.</span></div>}
       {tab === "Review queue" && (
         <section className="panel">
           <div className="panel-heading">

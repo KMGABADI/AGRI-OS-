@@ -30,7 +30,8 @@ const colors = [
   "#607b66",
   "#a8b69a",
 ];
-export default function Reports() {
+export default function Reports({embedded=false}:{embedded?:boolean}={}) {
+  const EmbeddedHeading=(props:any)=>embedded?<div className="embedded-actions">{props.actions}</div>:<PageHeading {...props}/>;
   const { snapshot, session, save, notify } = useWorkspace();
   const [edit, setEdit] = useState<Partial<Row> | null>(null),
     [working, setWorking] = useState(false);
@@ -59,7 +60,7 @@ export default function Reports() {
   };
   return (
     <>
-      <PageHeading
+      <EmbeddedHeading
         title="Reports & insights"
         eyebrow="MAKE EVERY DECISION COUNT"
         description="Explore your full registry, measure programme delivery, and share the national picture."

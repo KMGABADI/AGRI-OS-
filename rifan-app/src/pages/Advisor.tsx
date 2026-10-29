@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import { useWorkspace, api } from "../lib/workspace";
 import { PageHeading, Badge } from "../components/ui";
+import IntelligencePanel from "../components/operations/IntelligencePanel";
 export default function Advisor() {
   const { snapshot } = useWorkspace();
   const [messages, setMessages] = useState<{ role: string; text: string }[]>(
@@ -30,11 +31,19 @@ export default function Advisor() {
     setPending(true);
     setError("");
     try {
-      const r = await api("/api/advisor", {
-        method: "POST",
-        body: JSON.stringify({ messages: next.slice(-30) }),
-      });
-      setMessages([...next, { role: "assistant", text: r.text }]);
+      const r = await api(
+        snapshot.integrations.gemini
+          ? "/api/advisor"
+          : "/api/intelligence/advice",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            messages: next.slice(-30),
+            question: content,
+          }),
+        },
+      );
+      setMessages([...next, { role: "assistant", text: r.text || r.answer }]);
     } catch (e: any) {
       setError(e.message);
     } finally {
@@ -51,10 +60,11 @@ export default function Advisor() {
           <Badge tone={snapshot.integrations.gemini ? "green" : "gold"}>
             {snapshot.integrations.gemini
               ? "AI connected"
-              : "AI connection required"}
+              : "Recorded evidence available"}
           </Badge>
         }
       />
+      <IntelligencePanel />
       <div className="advisor-layout">
         <aside className="advisor-sidebar panel">
           <div className="advisor-icon">
