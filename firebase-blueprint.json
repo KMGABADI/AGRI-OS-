@@ -1,0 +1,96 @@
+{
+  "entities": {
+    "Farmer": {
+      "title": "Farmer",
+      "description": "Represents an agricultural producer record with yields and farm metrics",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "farmerID": { "type": "string", "maxLength": 64 },
+        "firstName": { "type": "string", "maxLength": 100 },
+        "lastName": { "type": "string", "maxLength": 100 },
+        "middleName": { "type": "string", "maxLength": 100 },
+        "title": { "type": "string", "maxLength": 20 },
+        "gender": { "type": "string", "maxLength": 20 },
+        "primaryPhone": { "type": "string", "maxLength": 30 },
+        "state": { "type": "string", "maxLength": 50 },
+        "lga": { "type": "string", "maxLength": 50 },
+        "crop": { "type": "string", "maxLength": 50 },
+        "farmSize": { "type": "number" },
+        "yield_amount": { "type": "number" },
+        "date": { "type": "string", "maxLength": 50 },
+        "profileStatus": { "type": "string", "maxLength": 30 },
+        "kycComplete": { "type": "boolean" },
+        "bvn": { "type": "string", "maxLength": 30 },
+        "nin": { "type": "string", "maxLength": 30 },
+        "dob": { "type": "string", "maxLength": 30 },
+        "experience": { "type": "number" },
+        "registrationDate": { "type": "string", "maxLength": 50 },
+        "latitude": { "type": "number" },
+        "longitude": { "type": "number" },
+        "organizationId": { "type": "string", "maxLength": 128 },
+        "programId": { "type": "string", "maxLength": 128 }
+      },
+      "required": ["farmerID", "firstName", "lastName"]
+    },
+    "User": {
+      "title": "User",
+      "description": "App user identity and role assignment",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128 },
+        "email": { "type": "string", "maxLength": 150 },
+        "displayName": { "type": "string", "maxLength": 100 },
+        "role": { "type": "string", "maxLength": 50 },
+        "accessLevel": { "type": "number" },
+        "photoURL": { "type": "string", "maxLength": 500 }
+      },
+      "required": ["uid", "email"]
+    },
+    "ActivityLog": {
+      "title": "ActivityLog",
+      "description": "Audit trails of system actions",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "action": { "type": "string", "maxLength": 50 },
+        "entityType": { "type": "string", "maxLength": 50 },
+        "entityId": { "type": "string", "maxLength": 128 },
+        "details": { "type": "string", "maxLength": 1000 },
+        "timestamp": { "type": "string", "maxLength": 50 }
+      },
+      "required": ["action", "entityType"]
+    },
+    "ChatMessage": {
+      "title": "ChatMessage",
+      "description": "Conversation messages for Gemini Agricultural Advisory chat",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "role": { "type": "string", "enum": ["user", "model", "system"] },
+        "content": { "type": "string", "maxLength": 10000 },
+        "timestamp": { "type": "string", "maxLength": 50 }
+      },
+      "required": ["userId", "role", "content"]
+    }
+  },
+  "firestore": {
+    "/farmers/{farmerId}": {
+      "schema": "Farmer",
+      "description": "Stores farmer profiles and yield records"
+    },
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "Stores registered user profiles and role permissions"
+    },
+    "/activityLogs/{logId}": {
+      "schema": "ActivityLog",
+      "description": "Immutable system audit events"
+    },
+    "/chatMessages/{messageId}": {
+      "schema": "ChatMessage",
+      "description": "User agricultural advisory chat transcripts"
+    }
+  }
+}

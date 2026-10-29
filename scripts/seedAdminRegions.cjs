@@ -1,0 +1,63 @@
+const admin = require('firebase-admin');
+const fs = require('fs');
+
+process.env.FIRESTORE_EMULATOR_HOST = '127.0.0.1:8080';
+if (!admin.apps.length) {
+  admin.initializeApp({ projectId: 'utilitarian-habitat-q4dh4' });
+}
+
+const db = admin.firestore();
+
+const COUNTRIES_REGIONS = {
+  Nigeria: { /* using static in code, but lets seed it anyway */ },
+  Niger: {
+    'Agadez': ['Arlit', 'Bilma', 'Tchirozérine'],
+    'Diffa': ['Diffa', 'Maine-Soroa', 'N\'guigmi'],
+    'Dosso': ['Boboye', 'Dogondoutchi', 'Dosso', 'Gaya', 'Loga'],
+    'Maradi': ['Aguie', 'Dakoro', 'Guidan Roumdji', 'Madarounfa', 'Mayahi', 'Tessaoua'],
+    'Niamey': ['Niamey I', 'Niamey II', 'Niamey III', 'Niamey IV', 'Niamey V'],
+    'Tahoua': ['Abalak', 'Birni-N\'Konni', 'Bouza', 'Illéla', 'Keita', 'Madaoua', 'Tahoua', 'Tchintabaraden'],
+    'Tillabéri': ['Filingue', 'Kollo', 'Ouallam', 'Say', 'Téra', 'Tillabéri'],
+    'Zinder': ['Goure', 'Magaria', 'Matameye', 'Mirriah', 'Tanout']
+  },
+  Cameroon: {
+    'Adamaoua': ['Djerem', 'Faro-et-Deo', 'Mayo-Banyo', 'Mbere', 'Vina'],
+    'Centre': ['Haute-Sanaga', 'Lekié', 'Mbam-et-Inoubou', 'Mbam-et-Kim', 'Mefou-et-Afamba', 'Mefou-et-Akono', 'Mfoundi', 'Nyong-et-Kelle', 'Nyong-et-Mfoumou', 'Nyong-et-So\'o'],
+    'East': ['Boumba-et-Ngoko', 'Haut-Nyong', 'Kadey', 'Lom-et-Djerem'],
+    'Far North': ['Diamare', 'Logone-et-Chari', 'Mayo-Danay', 'Mayo-Kani', 'Mayo-Sava', 'Mayo-Tsanaga'],
+    'Littoral': ['Moungo', 'Nkam', 'Sanaga-Maritime', 'Wouri'],
+    'North': ['Benoue', 'Faro', 'Mayo-Louti', 'Mayo-Rey'],
+    'Northwest': ['Boyo', 'Bui', 'Donga-Mantung', 'Menchum', 'Mezam', 'Momo', 'Ngo-Ketunjia'],
+    'South': ['Dja-et-Lobo', 'Mvila', 'Ocean', 'Vallee-du-Ntem'],
+    'Southwest': ['Fako', 'Koupe-Manengouba', 'Lebialem', 'Manyu', 'Meme', 'Ndian'],
+    'West': ['Bamboutos', 'Haut-Nkam', 'Hauts-Plateaux', 'Koung-Khi', 'Menoua', 'Mifi', 'Nde', 'Noun']
+  },
+  Benin: {
+    'Alibori': ['Banikoara', 'Gogounou', 'Kandi', 'Karimama', 'Malanville', 'Segbana'],
+    'Atakora': ['Boukoumbe', 'Cobly', 'Kerou', 'Kouande', 'Matéri', 'Natitingou', 'Pebrco', 'Tanguiéta', 'Toucountouna'],
+    'Atlantique': ['Abomey-Calavi', 'Allada', 'Kpomassè', 'Ouidah', 'Sô-Ava', 'Toffo', 'Tori-Bossito', 'Zè'],
+    'Borgou': ['Bembèrèkè', 'Kalalé', 'N\'Dali', 'Nikki', 'Parakou', 'Pèrèrè', 'Sinendé', 'Tchaourou'],
+    'Collines': ['Bantè', 'Dassa-Zoumé', 'Glazoué', 'Ouèssè', 'Savalou', 'Savè'],
+    'Couffo': ['Aplahoué', 'Djakotomey', 'Dogbo', 'Klouékanmè', 'Lalo', 'Toviklin'],
+    'Donga': ['Bassila', 'Copargo', 'Djougou', 'Ouaké'],
+    'Littoral': ['Cotonou'],
+    'Mono': ['Athiémé', 'Bopa', 'Comè', 'Grand-Popo', 'Houéyogbé', 'Lokossa'],
+    'Ouémé': ['Adjarra', 'Adjohoun', 'Aguégués', 'Akpro-Missérété', 'Avrankou', 'Bonou', 'Dangbo', 'Porto-Novo', 'Sèmè-Kpodji'],
+    'Plateau': ['Adja-Ouèrè', 'Ifangni', 'Kétou', 'Pobè', 'Sakété'],
+    'Zou': ['Abomey', 'Agbangnizoun', 'Bohicon', 'Covè', 'Djidja', 'Ouinhi', 'Za-Kpota', 'Zagnanado', 'Zogbodomey']
+  }
+};
+
+async function seed() {
+  console.log('Seeding adminRegions...');
+  const batch = db.batch();
+  for (const [country, regions] of Object.entries(COUNTRIES_REGIONS)) {
+    if (Object.keys(regions).length === 0) continue;
+    const ref = db.collection('adminRegions').doc(country);
+    batch.set(ref, { regions });
+  }
+  await batch.commit();
+  console.log('Done seeding adminRegions.');
+}
+
+seed().catch(console.error);
