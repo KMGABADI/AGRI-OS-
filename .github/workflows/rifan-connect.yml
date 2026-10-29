@@ -1,0 +1,35 @@
+name: RIFAN Connect checks
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'rifan-app/**'
+      - '.github/workflows/rifan-connect.yml'
+  pull_request:
+    paths:
+      - 'rifan-app/**'
+      - '.github/workflows/rifan-connect.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: rifan-app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: rifan-app/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
