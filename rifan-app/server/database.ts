@@ -51,6 +51,12 @@ CREATE TABLE IF NOT EXISTS otp_challenges(id TEXT PRIMARY KEY,user_id TEXT NOT N
       db.exec(
         `ALTER TABLE users ADD COLUMN ${column} INTEGER NOT NULL DEFAULT 0`,
       );
+  if (
+    !(db.prepare("PRAGMA table_info(source_records)").all() as any[]).some(
+      (c) => c.name === "submitted",
+    )
+  )
+    db.exec("ALTER TABLE source_records ADD COLUMN submitted TEXT");
   const actors = new AsyncLocalStorage<Session>();
   const withActor = <T>(actor: Session, callback: () => T) =>
     actors.run(actor, callback);

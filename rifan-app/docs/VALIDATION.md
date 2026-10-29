@@ -80,3 +80,10 @@ The supplied screenshots confirmed that Render only installed dependencies and t
 The application suite now reports **35 passing tests**. An additional **6 production deployment tests** verify startup from repository/app/unrelated directories, Render port binding, frontend route refreshes, immutable asset caching and missing-asset 404s, users/sessions surviving a restart on the same database, actionable missing-build errors and the root/app start scripts. Render-specific checks cover secure proxy cookies, configured external origins and per-client rate limits.
 
 See [RENDER.md](RENDER.md) for exact dashboard settings, persistent storage and the optional paid Blueprint. Hosted Render health still requires verification after the new commit is deployed; these local results do not claim a live redeployment.
+
+## Data-quality follow-up — 29 October 2026
+
+- TypeScript and **54 automated tests** pass, including phone equivalence, non-lossy normalization, preserved custom mappings, repeat-safe rechecks, accurate import counts, source permissions and Google Sheets rejected-row archival/row numbers.
+- Whole-registry validation checked all **172,743 private farmers** successfully; **12,381 rejected source rows** were rechecked with no fabricated replacements. SQLite integrity, duplicate-group and imported-source-link checks passed.
+- The new Data quality screen passed browser tests for complete auditing, repeated rechecks, aggregate-report downloads, mobile layout and absence of uncaught errors. The existing route/registration/card/export/import browser regression suite also passed against isolated synthetic data.
+- Private source files, farmer data, reports and the pre-maintenance backup remain excluded from GitHub.

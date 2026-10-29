@@ -1,4 +1,5 @@
 import type { Row } from "../model";
+import { normalizePhone } from "./phone";
 export const normalizeHeader = (s: string) =>
   s.toLowerCase().replace(/[^a-z0-9]/g, "");
 export const aliases: Record<string, string> = {
@@ -87,18 +88,11 @@ export function normalizeInput(
     if (v === "") continue;
     out[to] = v;
   }
-  if (out.primaryPhone) {
-    let p = String(out.primaryPhone).replace(/[\s()\-.]/g, "");
-    if (/^234\d{10}$/.test(p)) p = "+" + p;
-    else if (
-      /^[789]\d{9}$/.test(p) &&
-      (!out.country || out.country === "Nigeria")
-    ) {
-      p = "0" + p;
-      changes.push("Restored Nigerian phone leading zero");
-    }
-    if (p !== out.primaryPhone) changes.push("Normalized phone punctuation");
-    out.primaryPhone = p;
+  if (out.primaryPhone !== undefined) {
+    const original = out.primaryPhone;
+    out.primaryPhone = normalizePhone(original, out.country || "Nigeria");
+    if (out.primaryPhone !== original)
+      changes.push("Normalized complete phone punctuation or Nigerian prefix");
   }
   if (out.gender) {
     const g = String(out.gender).toLowerCase();
@@ -200,9 +194,7 @@ export function normalizeInput(
   out.profileStatus ||= "Pending";
   return { data: out, changes };
 }
-export async function parseUpload(
-  file: File,
-): Promise<{
+export async function parseUpload(file: File): Promise<{
   sheets: { name: string; headers: string[]; rows: Record<string, any>[] }[];
   encoding: string;
 }> {

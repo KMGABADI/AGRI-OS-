@@ -9,7 +9,9 @@
     "start": "NODE_ENV=production node dist/server.mjs",
     "lint": "tsc --noEmit",
     "test": "tsx --test tests/*.test.ts",
-    "test:deployment": "node --test tests/deployment.test.mjs"
+    "test:deployment": "node --test tests/deployment.test.mjs",
+    "data:check": "tsx scripts/data-quality.mts",
+    "data:recheck": "tsx scripts/data-quality.mts --apply"
   },
   "dependencies": {
     "@fontsource-variable/dm-sans": "^5.3.0",

@@ -25,6 +25,7 @@ import {
 import { farmerFields, entityFields, canEdit, type Row } from "../model";
 import { parseUpload, suggestMapping, normalizeInput } from "../lib/importing";
 import { download, exportRows, exportSpreadsheet } from "../lib/export";
+import DataQualityPanel from "../components/operations/DataQualityPanel";
 type Parsed = Awaited<ReturnType<typeof parseUpload>>;
 export default function DataHub() {
   const { snapshot, session, refresh, notify, save } = useWorkspace();
@@ -121,13 +122,11 @@ export default function DataHub() {
           body: JSON.stringify({
             batchId,
             source,
-            rows: data
-              .slice(offset, offset + 500)
-              .map((row, i) => ({
-                sourceRow: offset + i + 2,
-                raw: table.rows[offset + i],
-                data: row.data,
-              })),
+            rows: data.slice(offset, offset + 500).map((row, i) => ({
+              sourceRow: offset + i + 2,
+              raw: table.rows[offset + i],
+              data: row.data,
+            })),
           }),
         });
         for (const key of Object.keys(staged) as (keyof typeof staged)[])
@@ -217,6 +216,13 @@ export default function DataHub() {
           "Mapping templates",
           "Export & history",
           "Review queue",
+          ...(["Super Admin", "Admin"].includes(session.role) ||
+          (session.role === "Manager" &&
+            !session.organizationId &&
+            !session.states?.length &&
+            !session.lgas?.length)
+            ? ["Data quality"]
+            : []),
         ].map((t) => (
           <button
             key={t}
@@ -237,6 +243,15 @@ export default function DataHub() {
           <RefreshCw size={18} className="spin" />
           {progress}
         </div>
+      )}
+      {tab === "Data quality" && (
+        <DataQualityPanel
+          onReview={(id) => {
+            setReviewBatch(id);
+            setReviewOffset(0);
+            setTab("Review queue");
+          }}
+        />
       )}
       {tab === "Import records" && (
         <>
@@ -785,7 +800,20 @@ export default function DataHub() {
           </section>
         </>
       )}
-      {tab==='Review queue'&&reviewBatch&&<div className="heading-actions section-spacing"><a className="button primary" href={'/api/import/failures/'+reviewBatch+'.csv'}><Download size={16}/>Download ALL failed rows and reasons</a><span className="small-text muted">Contains original source values. Authorized reviewers only.</span></div>}
+      {tab === "Review queue" && reviewBatch && (
+        <div className="heading-actions section-spacing">
+          <a
+            className="button primary"
+            href={"/api/import/failures/" + reviewBatch + ".csv"}
+          >
+            <Download size={16} />
+            Download ALL failed rows and reasons
+          </a>
+          <span className="small-text muted">
+            Contains original source values. Authorized reviewers only.
+          </span>
+        </div>
+      )}
       {tab === "Review queue" && (
         <section className="panel">
           <div className="panel-heading">

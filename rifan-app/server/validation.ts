@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { normalizePhone } from "../src/lib/phone";
 import { COUNTRIES_REGIONS } from "../src/lib/crossBorderData";
 import { entityFields, type Entity, type Row } from "../src/model";
 export const farmerSchema = z
@@ -120,14 +121,35 @@ export function validate(entity: Entity, input: any): Row {
   if (out.startDate && out.endDate && out.endDate < out.startDate)
     throw new Error("End date cannot precede start date");
   if (entity === "farmers") {
+    if (
+      typeof out.primaryPhone === "string" &&
+      /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)[eE][+-]?\d+$/.test(out.primaryPhone.trim())
+    )
+      throw new Error(
+        "primaryPhone: scientific notation may have lost digits; supply the complete original phone as text",
+      );
+    if (out.primaryPhone !== undefined && typeof out.primaryPhone !== "string")
+      throw new Error(
+        "primaryPhone: store the complete phone as text to preserve leading zeros",
+      );
+    out.primaryPhone = normalizePhone(
+      out.primaryPhone,
+      out.country || "Nigeria",
+    );
+    for (const key of ["bvn", "nin", "accountNumber"])
+      if (typeof out[key] === "string") out[key] = out[key].trim();
     const country = Object.keys(COUNTRIES_REGIONS).find(
-      (c) => c.toLowerCase() === String(out.country || "Nigeria").toLowerCase(),
+      (c) =>
+        c.toLowerCase() ===
+        String(out.country || "Nigeria")
+          .trim()
+          .toLowerCase(),
     );
     if (!country) throw new Error("Choose a supported country");
     out.country = country;
     const regions = COUNTRIES_REGIONS[country];
     const state = Object.keys(regions).find(
-      (k) => k.toLowerCase() === String(out.state).toLowerCase(),
+      (k) => k.toLowerCase() === String(out.state).trim().toLowerCase(),
     );
     if (!state)
       throw new Error("State/region does not match the selected country");

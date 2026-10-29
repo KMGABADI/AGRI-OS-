@@ -42,6 +42,8 @@ import {
 } from "./features/policy";
 import { seedOperationsDemo } from "./features/demo";
 import { intelligenceFor } from "./features/intelligence";
+import { phoneKeys, canonicalPhone } from "../src/lib/phone";
+import { registerDataQuality, reconcileImport } from "./features/data-quality";
 
 type R = Request & { actor: Session };
 function fail(status: number, message: string): never {
@@ -326,11 +328,12 @@ export function createApi(
   const duplicate = (space: string, row: Row, except = "") => {
     for (const key of ["primaryPhone", "bvn", "nin", "farmerID"]) {
       if (!row[key]) continue;
+      const values = key === "primaryPhone" ? phoneKeys(row[key]) : [row[key]];
       const hit = s.db
         .prepare(
-          `SELECT data FROM records WHERE space=? AND entity='farmers' AND json_extract(data,'$.${key}')=? AND id<>? LIMIT 1`,
+          `SELECT data FROM records WHERE space=? AND entity='farmers' AND json_extract(data,'$.${key}') IN (${values.map(() => "?").join(",")}) AND id<>? LIMIT 1`,
         )
-        .get(space, row[key], except) as any;
+        .get(space, ...values, except) as any;
       if (hit) return JSON.parse(hit.data) as Row;
     }
     return undefined;
@@ -627,6 +630,7 @@ export function createApi(
     });
   const features = { app, s, allowed, requireWrite, farmerWhere };
   registerOperations(features);
+  registerDataQuality({ ...features, duplicate, refCheck });
   payments.mountPrivate(features);
   const summaries = new Map<string, { version: string; value: any }>();
   const summaryFor = (actor: Session, filters: any = {}) => {
@@ -1350,7 +1354,7 @@ export function createApi(
             );
           let status = "Valid",
             reason = "",
-            normalized: any;
+            normalized: any = item.data ? { ...item.data } : undefined;
           let match: Row | undefined;
           try {
             normalized = validate("farmers", {
@@ -1372,9 +1376,10 @@ export function createApi(
           if (existing) {
             s.db
               .prepare(
-                "UPDATE source_records SET normalized=?,status=?,reason=?,farmer_id=? WHERE id=?",
+                "UPDATE source_records SET submitted=?,normalized=?,status=?,reason=?,farmer_id=? WHERE id=?",
               )
               .run(
+                JSON.stringify(item.data),
                 normalized ? JSON.stringify(normalized) : null,
                 status,
                 reason,
@@ -1384,7 +1389,7 @@ export function createApi(
           } else {
             s.db
               .prepare(
-                "INSERT INTO source_records(batch_id,space,source_row,raw,normalized,status,reason,farmer_id) VALUES(?,?,?,?,?,?,?,?)",
+                "INSERT INTO source_records(batch_id,space,source_row,raw,normalized,status,reason,farmer_id,submitted) VALUES(?,?,?,?,?,?,?,?,?)",
               )
               .run(
                 batchId,
@@ -1395,6 +1400,7 @@ export function createApi(
                 status,
                 reason,
                 match?.id || null,
+                JSON.stringify(item.data),
               );
           }
           result.staged++;
@@ -1480,6 +1486,7 @@ export function createApi(
             summary: Object.fromEntries(counts.map((c) => [c.status, c.count])),
           });
       }
+      reconcileImport(s, req.actor.space, req.params.id);
       res.json({
         imported,
         duplicates,
@@ -1598,6 +1605,7 @@ export function createApi(
             summary: Object.fromEntries(counts.map((c) => [c.status, c.count])),
           });
         }
+        reconcileImport(s, req.actor.space, req.params.id);
         s.audit(
           req.actor,
           "CORRECT_IMPORT",
@@ -1632,7 +1640,12 @@ export function createApi(
           const d = duplicate(req.actor.space, row);
           const keys = ["primaryPhone", "bvn", "nin", "farmerID"]
             .filter((k) => row[k])
-            .map((k) => k + ":" + row[k]);
+            .map(
+              (k) =>
+                k +
+                ":" +
+                (k === "primaryPhone" ? canonicalPhone(row[k]) : row[k]),
+            );
           const repeated = keys.some((k) => seen.has(k));
           keys.forEach((k) => seen.add(k));
           return {
@@ -2108,17 +2121,20 @@ export function createApi(
         invalid = 0;
       const seen = new Set<string>();
       const rows = rawRows
-        .filter((r) => r.some((v) => v !== "" && v !== null))
-        .map((cells: any[], i: number) => {
+        .map((cells: any[], index: number) => ({ cells, sourceRow: index + 2 }))
+        .filter(({ cells }) => cells.some((v) => v !== "" && v !== null))
+        .map(({ cells, sourceRow }) => {
           const raw = Object.fromEntries(
             headers.map((h: any, j: number) => [h, cells[j] ?? ""]),
           );
+          let submitted: any;
           try {
             const normalized = normalizeInput(raw, mapping).data;
+            submitted = normalized;
             let match = duplicate(req.actor.space, normalized as Row);
             if (match && !allowed(req.actor, "farmers", match))
               throw new Error("Matching member is outside assigned scope");
-            const key = match?.id || String(normalized.primaryPhone || "");
+            const key = match?.id || canonicalPhone(normalized.primaryPhone);
             if (seen.has(key))
               throw new Error("Duplicate member within the worksheet");
             seen.add(key);
@@ -2140,7 +2156,8 @@ export function createApi(
             if (match) updates++;
             else additions++;
             return {
-              sourceRow: i + 2,
+              sourceRow,
+              submitted,
               status: match ? "Update" : "New",
               reason: match
                 ? "Matched existing member; identity verification and account status retained"
@@ -2153,7 +2170,8 @@ export function createApi(
           } catch (e) {
             invalid++;
             return {
-              sourceRow: i + 2,
+              sourceRow,
+              submitted,
               status: "Invalid",
               reason: (e as Error).message,
               raw,
@@ -2172,7 +2190,7 @@ export function createApi(
         additions,
         updates,
         invalid,
-        rows: rows.map(({ data, raw, ...r }: any) => r),
+        rows: rows.map(({ data, raw, submitted, ...r }: any) => r),
       });
     }),
   );
@@ -2195,7 +2213,24 @@ export function createApi(
         updated = 0;
       s.transaction(() => {
         for (const row of preview.rows) {
-          if (row.status === "Invalid") continue;
+          if (row.status === "Invalid") {
+            s.db
+              .prepare(
+                "INSERT OR IGNORE INTO source_records(batch_id,space,source_row,raw,normalized,status,reason,farmer_id,submitted) VALUES(?,?,?,?,?,?,?,?,?)",
+              )
+              .run(
+                preview.id,
+                req.actor.space,
+                row.sourceRow,
+                JSON.stringify(row.raw),
+                null,
+                "Invalid",
+                row.reason,
+                null,
+                row.submitted ? JSON.stringify(row.submitted) : null,
+              );
+            continue;
+          }
           let data = validate("farmers", row.data);
           if (row.matchId) {
             const current = s.get(req.actor.space, "farmers", row.matchId);
@@ -2221,7 +2256,7 @@ export function createApi(
           }
           s.db
             .prepare(
-              "INSERT OR IGNORE INTO source_records(batch_id,space,source_row,raw,normalized,status,reason,farmer_id) VALUES(?,?,?,?,?,?,?,?)",
+              "INSERT OR IGNORE INTO source_records(batch_id,space,source_row,raw,normalized,status,reason,farmer_id,submitted) VALUES(?,?,?,?,?,?,?,?,?)",
             )
             .run(
               preview.id,
@@ -2232,6 +2267,9 @@ export function createApi(
               "Imported",
               "Google Sheets synchronization",
               data.id,
+              row.submitted
+                ? JSON.stringify(row.submitted)
+                : JSON.stringify(row.data),
             );
         }
         s.put(req.actor.space, "imports", {
@@ -2239,8 +2277,11 @@ export function createApi(
           name: "Google Sheets synchronization",
           date: new Date().toISOString(),
           count: created + updated,
-          status: "Completed",
+          status: preview.rows.some((r: any) => r.status === "Invalid")
+            ? "Completed with review"
+            : "Completed",
           summary: {
+            Imported: created + updated,
             Created: created,
             Updated: updated,
             Invalid: preview.rows.filter((r: any) => r.status === "Invalid")

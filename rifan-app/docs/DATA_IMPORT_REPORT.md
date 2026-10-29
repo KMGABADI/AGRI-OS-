@@ -56,3 +56,17 @@ Private storage is `.data/rifan.sqlite` and `.data/source/`, with restrictive fi
 Authorized reviewers can use Data hub's review queue. Corrected rows are revalidated and linked to the original unchanged source. A duplicate links to the matching member for deliberate review.
 
 No temporary import/verification accounts remain after the import tools exit. The workspace owner must initialize a private account; there is no built-in production administrator password.
+
+## Full data recheck — 29 October 2026
+
+The private database passed SQLite integrity checks. Every one of the **172,743 registered farmers** was revalidated: **172,743 valid, 0 requiring correction, 0 formatting changes**. There are no duplicate phone/BVN/NIN/member-ID groups, including equivalent Nigerian local and international phone formats, and no imported source rows with missing farmer links.
+
+All **12,381 rejected rows** were rechecked against their preserved source values; none could be made valid without guessing. **7,560 diagnostic messages** were updated to explicitly explain scientific-notation phone corruption. All 186,353 original source rows, all 172,743 farmer records, and the 1,229 retained duplicates remain preserved. A consistent private SQLite backup was created before maintenance, and an aggregate quality report was saved under `.data/quality-reports/`.
+
+The current first-failure categories are: 7,560 scientific-notation phones; 3,819 other phone-format failures; 626 invalid first names; 191 invalid full birth dates; 90 invalid last names; 74 state/LGA mismatches; 14 first names too short; 3 last names too short; 3 missing phones; and 1 short first name plus invalid phone. Counts can move between first-failure categories as more precise checks run; no issue was hidden to increase the import count.
+
+All imported farmers currently lack complete recorded GPS pairs and confirmed full birth dates. Ambiguous source birth dates remain available for review; no locations or birth-date centuries were invented. The incomplete supplied XLSX remains blocked until a complete source workbook or CSV is provided.
+
+Data hub now includes **Data quality** for authorized administrators and unrestricted reviewers: audit the whole registry in batches, recheck rejected rows, download an aggregate report, review individual corrections and import records that become valid. Original custom mappings are retained for future rechecks. Rechecking never automatically merges duplicate members or imports a record that still fails validation.
+
+The code update is deployable through GitHub. The cloud workspace database is separate from Render's persistent disk; deploy the update and use Data hub's recheck there to apply the same checks to hosted data. Private records and backups are not published to GitHub.
