@@ -1,0 +1,28 @@
+# Deploy with Render Blueprints. This configuration uses a PAID web service
+# and persistent disk because the application stores private SQLite data.
+# It does not transfer the private cloud database or provision Google secrets.
+services:
+  - type: web
+    name: rifan-connect
+    runtime: node
+    plan: starter
+    rootDir: rifan-app
+    numInstances: 1
+    buildCommand: npm ci --include=dev --no-audit --no-fund && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: "24"
+      - key: NODE_ENV
+        value: production
+      - key: RIFAN_DB_PATH
+        value: /var/data/rifan.sqlite
+      - key: COOKIE_SECURE
+        value: "true"
+      - key: ENABLE_DEMO
+        value: "false"
+    disk:
+      name: rifan-data
+      mountPath: /var/data
+      sizeGB: 5

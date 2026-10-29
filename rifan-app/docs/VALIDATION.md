@@ -1,12 +1,12 @@
 # Validation evidence
 
-Validation was performed in the actual cloud machine using Node.js 24.19.0 and npm 11.9.0. The original AGRI-OS tracked files were left unchanged.
+Validation was performed in the actual cloud machine using Node.js 24.19.0 and npm 11.9.0. The original AGRI-OS application source is preserved. The Render follow-up changes repository-root package commands to launch RIFAN Connect, with the original commands retained under `legacy:*`.
 
 | Check                               | Outcome                                                                                                                                                                                        |
 | ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Frozen dependency install, `npm ci` | Passed; new app reduced to its used dependencies                                                                                                                                               |
 | Strict TypeScript, `npm run lint`   | Passed                                                                                                                                                                                         |
-| API/integration suite, `npm test`   | **30 passed, 0 failed, 0 skipped** (includes the two parent test groups)                                                                                                                       |
+| API/integration suite, `npm test`   | **35 passed, 0 failed, 0 skipped** (includes the two parent test groups)                                                                                                                       |
 | Frontend + backend production build | Passed                                                                                                                                                                                         |
 | Production HTTP service             | Started and responded successfully                                                                                                                                                             |
 | Browser route checks                | Passed for registry, membership, cooperatives, warehouses, programmes/monitoring, calendar, data hub, reports, connections, food bank, advisor, alerts, settings, team, audit, account and map |
@@ -72,3 +72,11 @@ Synthetic-only screenshots are in `docs/screenshots/`. They do not display the u
 - The public farmer website and self-service farmer accounts are future launch work. The application endpoint is prepared but disabled.
 - Browser print invocation and document layout were tested, not a physical printer.
 - Configuration draft persistence was confirmed. Environment publication, public app deployment and restoration into a fresh task were not performed.
+
+## Render regression follow-up
+
+The supplied screenshots confirmed that Render only installed dependencies and then tried to run an unbuilt legacy `dist/server.cjs`. The fix was checked using **Bun 1.4.4**, matching the supplied logs, in an isolated source copy with no private database or prior artifacts. Both a clean install and an unchanged dependency-cache install rebuilt the new production files, and `bun run start` returned RIFAN Connect health on the assigned port.
+
+The application suite now reports **35 passing tests**. An additional **6 production deployment tests** verify startup from repository/app/unrelated directories, Render port binding, frontend route refreshes, immutable asset caching and missing-asset 404s, users/sessions surviving a restart on the same database, actionable missing-build errors and the root/app start scripts. Render-specific checks cover secure proxy cookies, configured external origins and per-client rate limits.
+
+See [RENDER.md](RENDER.md) for exact dashboard settings, persistent storage and the optional paid Blueprint. Hosted Render health still requires verification after the new commit is deployed; these local results do not claim a live redeployment.

@@ -55,6 +55,21 @@ export function createApi(
     };
   } = {},
 ) {
+  const publicUrl = (
+    process.env.PUBLIC_URL ||
+    process.env.RENDER_EXTERNAL_URL ||
+    ""
+  ).replace(/\/+$/, "");
+  let publicOrigin: string | undefined;
+  if (publicUrl) {
+    try {
+      const parsed = new URL(publicUrl);
+      if (!["http:", "https:"].includes(parsed.protocol)) throw new Error();
+      publicOrigin = parsed.origin;
+    } catch {
+      throw new Error("PUBLIC_URL must be a valid HTTP(S) application URL.");
+    }
+  }
   const s = openDatabase(
     options.filename || process.env.RIFAN_DB_PATH || ".data/rifan.sqlite",
   );
@@ -65,6 +80,7 @@ export function createApi(
   if (demoEnabled) seedDemo(s);
   const app = express();
   app.disable("x-powered-by");
+  if (process.env.RENDER === "true") app.set("trust proxy", 1);
   app.use(express.json({ limit: "8mb" }));
   app.use((req, res, next) => {
     res.setHeader("X-Content-Type-Options", "nosniff");
@@ -78,8 +94,15 @@ export function createApi(
       !["GET", "HEAD", "OPTIONS"].includes(req.method) &&
       req.headers.origin
     ) {
-      const origin = new URL(req.headers.origin);
-      if (origin.host !== req.headers.host)
+      let origin: URL;
+      try {
+        origin = new URL(req.headers.origin);
+      } catch {
+        return res
+          .status(403)
+          .json({ error: "A valid same-site Origin is required" });
+      }
+      if (origin.host !== req.headers.host && origin.origin !== publicOrigin)
         return res
           .status(403)
           .json({ error: "Cross-origin write requests are not allowed" });
@@ -88,7 +111,7 @@ export function createApi(
   });
   const attempts = new Map<string, { count: number; until: number }>();
   const rateLimit = (req: Request, res: Response, next: NextFunction) => {
-    const key = req.socket.remoteAddress || "local";
+    const key = req.ip || req.socket.remoteAddress || "local";
     let a = attempts.get(key);
     if (!a || a.until < Date.now()) {
       a = { count: 0, until: Date.now() + 60000 };
@@ -116,7 +139,10 @@ export function createApi(
     res.cookie("rifan_session", token, {
       httpOnly: true,
       sameSite: "lax",
-      secure: process.env.COOKIE_SECURE === "true",
+      secure:
+        process.env.COOKIE_SECURE === "true" ||
+        (process.env.RENDER === "true" &&
+          process.env.COOKIE_SECURE !== "false"),
       maxAge: 8 * 60 * 60 * 1000,
       path: "/",
     });
@@ -762,7 +788,7 @@ export function createApi(
           google: !!(
             process.env.GOOGLE_CLIENT_ID &&
             process.env.GOOGLE_CLIENT_SECRET &&
-            process.env.PUBLIC_URL
+            publicUrl
           ),
           googleConnected: !!google,
         },
@@ -1879,7 +1905,7 @@ export function createApi(
     if (
       !process.env.GOOGLE_CLIENT_ID ||
       !process.env.GOOGLE_CLIENT_SECRET ||
-      !process.env.PUBLIC_URL
+      !publicUrl
     )
       fail(
         503,
@@ -1891,7 +1917,7 @@ export function createApi(
       client: new google.auth.OAuth2(
         process.env.GOOGLE_CLIENT_ID,
         process.env.GOOGLE_CLIENT_SECRET,
-        `${process.env.PUBLIC_URL}/api/google/callback`,
+        `${publicUrl}/api/google/callback`,
       ),
     };
   };

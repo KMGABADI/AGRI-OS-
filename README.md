@@ -4,9 +4,13 @@
 
 The new RIFAN Connect application is in [`rifan-app/`](rifan-app/). It includes RIFAN branding and page watermarks, farmer profiles, printable and bulk-exportable ID cards, validated spreadsheet uploads, a separate database, memberships and fees, field operations, food-bank storage, reporting, and Google Sheets integration.
 
+## Deploy on Render
+
+See the [Render deployment guide](rifan-app/docs/RENDER.md) for the confirmed missing-server fix and exact service settings. A [Render Blueprint](render.yaml) is included; it uses paid persistent storage for the SQLite database.
+
 ## Run RIFAN Connect
 
-Requires **Node.js 24+**.
+Requires **Node.js 24.x**.
 
 ```bash
 cd rifan-app
@@ -34,7 +38,7 @@ Create your private workspace administrator account before public exposure. Deve
 - [Data import report](rifan-app/docs/DATA_IMPORT_REPORT.md)
 - [Validation evidence](rifan-app/docs/VALIDATION.md)
 
-The original AGRI-OS application is preserved outside `rifan-app/` as a reference. The new application does not use its Firebase database.
+The original AGRI-OS source is preserved outside `rifan-app/` as a reference. Repository-root commands now run RIFAN Connect; use `npm run legacy:dev` or `npm run legacy:build` for the original app. The new application does not use its Firebase database.
 
 ## Data and deployment
 

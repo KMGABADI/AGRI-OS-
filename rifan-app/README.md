@@ -4,6 +4,10 @@
 
 A new application in `rifan-app/`, built from the AGRI-OS feature inventory. The original application outside this directory is unchanged. RIFAN Connect uses its own database and never connects to the original Firebase project.
 
+## Render deployment
+
+See [the Render guide](docs/RENDER.md) for exact settings and the missing `dist/server.cjs` failure. The repo-root `render.yaml` provides an optional paid persistent-disk Blueprint.
+
 ## Start
 
 Requires Node.js 24 or later (`node:sqlite`).

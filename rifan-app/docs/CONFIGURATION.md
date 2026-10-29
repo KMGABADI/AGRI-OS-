@@ -1,8 +1,10 @@
 # Configuration and deployment
 
+For Render, follow [RENDER.md](RENDER.md). It covers the install-without-build failure, service settings, paid persistent storage, and importing the private database.
+
 ## Runtime
 
-Use Node.js 24+ and run commands from `rifan-app/`. The main service defaults to port 3001. `npm run dev` serves Express + Vite; `npm run build` prepares assets and `dist/server.mjs`; `npm start` serves the production build.
+Use Node.js 24.x and run commands from `rifan-app/`. The main service defaults to port 3001. `npm run dev` serves Express + Vite; `npm run build` prepares assets and `dist/server.mjs`; `npm start` serves the production build.
 
 | Variable                          | Purpose                                                                                  |
 | --------------------------------- | ---------------------------------------------------------------------------------------- |
@@ -16,7 +18,7 @@ Use Node.js 24+ and run commands from `rifan-app/`. The main service defaults to
 | `GEMINI_MODEL`                    | Optional model; default `gemini-2.5-flash`                                               |
 | `GOOGLE_CLIENT_ID`                | Google OAuth Web application client ID                                                   |
 | `GOOGLE_CLIENT_SECRET`            | OAuth client secret, supplied securely                                                   |
-| `PUBLIC_URL`                      | Deployed HTTPS base URL used to build the OAuth redirect URI                             |
+| `PUBLIC_URL`                      | Deployed HTTPS base URL for OAuth; falls back to Render’s `RENDER_EXTERNAL_URL`                             |
 
 Copy `.env.example` to an ignored local `.env` only when needed; do not put secrets in source, screenshots or chat. Check existing environment bindings before creating new requirements. The current environment has no Google OAuth client configuration or Gemini key, so those live services were not authenticated.
 
