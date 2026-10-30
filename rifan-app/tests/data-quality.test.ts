@@ -1,6 +1,6 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { createApi } from "../server/api";
+import { createTestApi as createApi } from "./database";
 import { normalizeInput, suggestMapping } from "../src/lib/importing";
 import { validate } from "../server/validation";
 import { normalizePhone, canonicalPhone } from "../src/lib/phone";
@@ -9,7 +9,7 @@ import {
   reconcileImport,
 } from "../server/features/data-quality";
 let sheetRows: any[][] = [];
-const { app, store } = createApi({
+const { app, store } = await createApi({
   filename: ":memory:",
   demo: false,
   sheetsAdapter: { read: async () => sheetRows, write: async () => {} },
@@ -20,7 +20,7 @@ const base = "http://127.0.0.1:" + (server.address() as any).port;
 let cookie = "";
 after(async () => {
   await new Promise<void>((r) => server.close(() => r()));
-  store.db.close();
+  await store.db.close();
 });
 async function call(url: string, method = "GET", body?: any, session = cookie) {
   const res = await fetch(base + url, {
@@ -115,9 +115,9 @@ test("whole-database checks, preserved mappings and repeat-safe revalidation", a
         rows: [{ sourceRow: 2, raw, data }],
       });
       assert.equal(r.status, 200);
-      const source = store.db
+      const source = (await store.db
         .prepare("SELECT * FROM source_records WHERE batch_id='quality-batch'")
-        .get() as any;
+        .get()) as any;
       assert.deepEqual(JSON.parse(source.raw), raw);
       assert.deepEqual(JSON.parse(source.submitted), data);
       const recheck = await call("/api/data-quality/recheck", "POST", {});
@@ -126,9 +126,9 @@ test("whole-database checks, preserved mappings and repeat-safe revalidation", a
       assert.deepEqual(
         JSON.parse(
           (
-            store.db
+            (await store.db
               .prepare("SELECT raw FROM source_records WHERE id=?")
-              .get(source.id) as any
+              .get(source.id)) as any
           ).raw,
         ),
         raw,
@@ -142,13 +142,13 @@ test("whole-database checks, preserved mappings and repeat-safe revalidation", a
   await t.test(
     "old recoverable rows are revalidated and imported once, with exact ledger counts",
     async () => {
-      store.put("workspace", "imports", {
+      await store.put("workspace", "imports", {
         id: "legacy-batch",
         count: 999,
         status: "Completed with review",
       });
       const row = { ...farmer, primaryPhone: "08032345678" };
-      store.db
+      await store.db
         .prepare(
           "INSERT INTO source_records(batch_id,space,source_row,raw,status,reason) VALUES(?,?,?,?,?,?)",
         )
@@ -165,14 +165,17 @@ test("whole-database checks, preserved mappings and repeat-safe revalidation", a
       });
       assert.equal(r.body.ready, 1, JSON.stringify(r.body));
       assert.equal(
-        store.get("workspace", "imports", "legacy-batch")?.status,
+        (await store.get("workspace", "imports", "legacy-batch"))?.status,
         "Ready to import",
       );
       r = await call("/api/import/staged/legacy-batch/commit", "POST", {});
       assert.equal(r.body.imported, 1);
-      assert.equal(store.get("workspace", "imports", "legacy-batch")?.count, 1);
       assert.equal(
-        store.get("workspace", "imports", "legacy-batch")?.status,
+        (await store.get("workspace", "imports", "legacy-batch"))?.count,
+        1,
+      );
+      assert.equal(
+        (await store.get("workspace", "imports", "legacy-batch"))?.status,
         "Completed",
       );
       assert.equal(
@@ -198,11 +201,11 @@ test("whole-database checks, preserved mappings and repeat-safe revalidation", a
       assert.equal(summary.body.farmers.missingCoordinates, 2);
       assert.equal(summary.body.orphanedSources, 0);
       assert.equal(summary.body.duplicateGroups.primaryPhone, 0);
-      const records = store.all("workspace", "farmers");
+      const records = await store.all("workspace", "farmers");
       const audit = await call("/api/data-quality/audit", "POST", {});
       assert.equal(audit.body.valid, 2);
       assert.equal(audit.body.needsReview, 0);
-      assert.deepEqual(store.all("workspace", "farmers"), records);
+      assert.deepEqual(await store.all("workspace", "farmers"), records);
       assert.equal(
         (await call("/api/data-quality/audit", "POST", { version: "stale" }))
           .status,
@@ -250,20 +253,22 @@ test("whole-database checks, preserved mappings and repeat-safe revalidation", a
         previewId: preview.body.previewId,
       });
       assert.equal(applied.status, 200, JSON.stringify(applied.body));
-      const rows = store.db
+      const rows = (await store.db
         .prepare(
           "SELECT * FROM source_records WHERE batch_id=? ORDER BY source_row",
         )
-        .all("sheet-preview-" + preview.body.previewId) as any[];
+        .all("sheet-preview-" + preview.body.previewId)) as any[];
       assert.equal(rows.length, 4);
       assert.equal(rows[1].status, "Invalid");
       assert.equal(JSON.parse(rows[1].raw).primaryPhone, "8.12345E+09");
       assert.equal(JSON.parse(rows[1].submitted).primaryPhone, "8.12345E+09");
       assert.equal(
-        store.get(
-          "workspace",
-          "imports",
-          "sheet-preview-" + preview.body.previewId,
+        (
+          await store.get(
+            "workspace",
+            "imports",
+            "sheet-preview-" + preview.body.previewId,
+          )
         )?.status,
         "Completed with review",
       );
@@ -271,15 +276,15 @@ test("whole-database checks, preserved mappings and repeat-safe revalidation", a
   );
   await t.test(
     "an original damaged-file failure is not relabelled completed",
-    () => {
-      store.put("workspace", "imports", {
+    async () => {
+      await store.put("workspace", "imports", {
         id: "damaged-file",
         status: "Rejected",
         count: 0,
       });
-      reconcileImport(store, "workspace", "damaged-file");
+      await reconcileImport(store, "workspace", "damaged-file");
       assert.equal(
-        store.get("workspace", "imports", "damaged-file")?.status,
+        (await store.get("workspace", "imports", "damaged-file"))?.status,
         "Rejected",
       );
     },

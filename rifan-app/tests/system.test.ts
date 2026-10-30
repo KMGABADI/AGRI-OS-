@@ -1,6 +1,6 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { createApi } from "../server/api";
+import { createTestApi as createApi } from "./database";
 import {
   parseUpload,
   normalizeInput,
@@ -13,7 +13,7 @@ let sheetValues: any[][] = [
   ["First Name", "Last Name", "Phone", "State", "LGA", "Gender", "Farm Size"],
   ["Amina", "Bello", "08012345678", "Kebbi", "Birnin Kebbi", "Female", "2"],
 ];
-const { app, store } = createApi({
+const { app, store } = await createApi({
   filename: ":memory:",
   demo: true,
   sheetsAdapter: {
@@ -28,7 +28,7 @@ await new Promise<void>((r) => server.once("listening", r));
 const base = "http://127.0.0.1:" + (server.address() as any).port;
 after(async () => {
   await new Promise<void>((r) => server.close(() => r()));
-  store.db.close();
+  await store.db.close();
 });
 let cookie = "",
   ownerId = "",
@@ -65,7 +65,6 @@ const farmer = {
   farmSize: 2,
   bvn: "12345678901",
 };
-
 test("authentication, access policy, record integrity and membership workflow", async (t) => {
   await t.test("unauthenticated access is rejected", async () => {
     assert.equal((await call("/api/snapshot")).status, 401);
@@ -438,7 +437,6 @@ test("authentication, access policy, record integrity and membership workflow", 
     },
   );
 });
-
 test("CSV, ZIP and Excel parsing, staged uploads and safe sheet synchronization", async (t) => {
   await t.test(
     "CSV and ZIP are parsed with the same mapping rules",
@@ -491,8 +489,8 @@ test("CSV, ZIP and Excel parsing, staged uploads and safe sheet synchronization"
     "damaged Excel is rejected without guessing missing data",
     async () => {
       await assert.rejects(
-        () =>
-          parseUpload(
+        async () =>
+          await parseUpload(
             new File([new Uint8Array([80, 75, 3, 4, 0, 0])], "broken.xlsx"),
           ),
         /incomplete|damaged/,
@@ -708,11 +706,11 @@ test("CSV, ZIP and Excel parsing, staged uploads and safe sheet synchronization"
       assert.equal(corrected.status, 200);
       assert.equal(corrected.body.firstName, "CORRECTED");
       assert.equal(corrected.body.kycComplete, false);
-      const raw = store.db
+      const raw = (await store.db
         .prepare(
           "SELECT raw FROM source_records WHERE batch_id='test-batch-1' AND source_row=4",
         )
-        .get() as any;
+        .get()) as any;
       assert.equal(JSON.parse(raw.raw).phone, "broken");
     },
   );

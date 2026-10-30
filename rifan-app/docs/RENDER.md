@@ -1,3 +1,5 @@
+For the new DigitalOcean PostgreSQL deployment, use [POSTGRES_DIGITALOCEAN.md](POSTGRES_DIGITALOCEAN.md) and `render.postgres.yaml`. This guide retains the earlier SQLite deployment and missing-build repair instructions.
+
 # Render deployment and the missing-server fix
 
 ## Confirmed failure

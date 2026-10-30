@@ -16,9 +16,12 @@ const filename = path.resolve(
 const space = process.env.RIFAN_DATA_SPACE || "workspace",
   apply = process.argv.includes("--apply");
 const readonly = new DatabaseSync(filename, { readOnly: true });
-if ((readonly.prepare("PRAGMA quick_check").get() as any).quick_check !== "ok")
+if (
+  ((await readonly.prepare("PRAGMA quick_check").get()) as any).quick_check !==
+  "ok"
+)
   throw new Error("SQLite integrity check failed. No changes made.");
-const before = dataQualitySummary({ db: readonly }, space);
+const before = await dataQualitySummary({ db: readonly }, space);
 const registry = {
   checked: 0,
   valid: 0,
@@ -26,7 +29,7 @@ const registry = {
   normalizable: 0,
   reasons: {} as Record<string, number>,
 };
-for (const item of readonly
+for await (const item of readonly
   .prepare(
     "SELECT data FROM records WHERE space=? AND entity='farmers' ORDER BY rowid",
   )
@@ -41,9 +44,9 @@ for (const item of readonly
     ])
       if (
         cleaned[key] &&
-        !readonly
+        !(await readonly
           .prepare("SELECT id FROM records WHERE space=? AND entity=? AND id=?")
-          .get(space, entity, cleaned[key])
+          .get(space, entity, cleaned[key]))
       )
         throw new Error(`${key} points to a missing record`);
     registry.valid++;
@@ -68,8 +71,8 @@ if (apply) {
   );
   await backup(readonly, backupPath);
   chmodSync(backupPath, 0o600);
-  readonly.close();
-  const s = openDatabase(filename);
+  await readonly.close();
+  const s = await openDatabase(filename);
   const actor = {
     id: "data-maintenance",
     name: "Data maintenance",
@@ -78,15 +81,15 @@ if (apply) {
     space,
     demo: false,
   } as Session;
-  const duplicate = (space: string, row: Row) => {
+  const duplicate = async (space: string, row: Row) => {
     for (const key of ["primaryPhone", "bvn", "nin", "farmerID"]) {
       if (!row[key]) continue;
       const values = key === "primaryPhone" ? phoneKeys(row[key]) : [row[key]];
-      const hit = s.db
+      const hit = (await s.db
         .prepare(
           `SELECT data FROM records WHERE space=? AND entity='farmers' AND json_extract(data,'$.${key}') IN (${values.map(() => "?").join(",")}) LIMIT 1`,
         )
-        .get(space, ...values) as any;
+        .get(space, ...values)) as any;
       if (hit) return JSON.parse(hit.data);
     }
     return undefined;
@@ -99,20 +102,20 @@ if (apply) {
     updated: 0,
   };
   let afterId = 0;
-  s.withActor(actor, () => {
+  s.withActor(actor, async () => {
     while (true) {
-      const result = recheckSources(s, actor, { afterId }, duplicate);
+      const result = await recheckSources(s, actor, { afterId }, duplicate);
       for (const key of Object.keys(totals) as (keyof typeof totals)[])
         totals[key] += result[key];
       if (!result.remaining) break;
       afterId = result.afterId;
     }
-    s.transaction(() => {
-      for (const row of s.db
+    await s.transaction(async () => {
+      for (const row of (await s.db
         .prepare("SELECT id FROM records WHERE space=? AND entity='imports'")
-        .all(space) as any[])
-        reconcileImport(s, space, row.id);
-      s.audit(
+        .all(space)) as any[])
+        await reconcileImport(s, space, row.id);
+      await s.audit(
         actor,
         "DATA_QUALITY",
         "farmers",
@@ -121,9 +124,9 @@ if (apply) {
       );
     });
   });
-  outcome = { recheck: totals, after: dataQualitySummary(s, space) };
-  s.db.close();
-} else readonly.close();
+  outcome = { recheck: totals, after: await dataQualitySummary(s, space) };
+  await s.db.close();
+} else await readonly.close();
 const report = {
   generatedAt: new Date().toISOString(),
   mode: apply

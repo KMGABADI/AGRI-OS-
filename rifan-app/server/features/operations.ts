@@ -1,3 +1,4 @@
+import { asyncMap, asyncFilter } from "../db/async-collections";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import type { Entity, Row, Session } from "../../src/model";
@@ -62,17 +63,16 @@ export function validateBoundary(value: any) {
 export function canPlan(actor: Session) {
   return manager(actor) || actor.plannerApproved === true;
 }
-export function validateLinks(
+export async function validateLinks(
   ctx: FeatureContext,
   actor: Session,
   entity: Entity,
   row: Row,
 ) {
   if (row.programId) {
-    const parent = ctx.s.get(actor.space, "programs", row.programId);
+    const parent = await ctx.s.get(actor.space, "programs", row.programId);
     if (parent?.organizationId) row.organizationId = parent.organizationId;
   }
-
   for (const [field, target] of [
     ["programId", "programs"],
     ["seasonId", "seasons"],
@@ -82,13 +82,13 @@ export function validateLinks(
     ["farmerId", "farmers"],
   ] as [string, Entity][]) {
     if (row[field]) {
-      const parent = ctx.s.get(actor.space, target, row[field]);
-      if (!parent || !ctx.allowed(actor, target, parent))
+      const parent = await ctx.s.get(actor.space, target, row[field]);
+      if (!parent || !(await ctx.allowed(actor, target, parent)))
         reject(400, `Invalid or inaccessible ${field}`);
     }
   }
   if (row.seasonId) {
-    const season = ctx.s.get(actor.space, "seasons", row.seasonId)!;
+    const season = (await ctx.s.get(actor.space, "seasons", row.seasonId))!;
     if (row.programId && row.programId !== season.programId)
       reject(400, "Season must belong to the selected programme");
     if (
@@ -102,11 +102,11 @@ export function validateLinks(
       );
   }
   if (row.interventionId) {
-    const intervention = ctx.s.get(
+    const intervention = (await ctx.s.get(
       actor.space,
       "interventions",
       row.interventionId,
-    )!;
+    ))!;
     if (
       row.programId !== intervention.programId ||
       row.seasonId !== intervention.seasonId
@@ -117,7 +117,11 @@ export function validateLinks(
       );
   }
   if (row.locationId) {
-    const site = ctx.s.get(actor.space, "farmLocations", row.locationId)!;
+    const site = (await ctx.s.get(
+      actor.space,
+      "farmLocations",
+      row.locationId,
+    ))!;
     if (row.farmerId && row.farmerId !== site.farmerId)
       reject(400, "Farm site must belong to the selected farmer");
     if (row.seasonId !== site.seasonId)
@@ -127,8 +131,8 @@ export function validateLinks(
     if (!Array.isArray(row.warehouseIds) || row.warehouseIds.length > 100)
       reject(400, "Select a valid list of warehouses");
     for (const id of row.warehouseIds) {
-      const w = ctx.s.get(actor.space, "warehouses", id);
-      if (!w || !ctx.allowed(actor, "warehouses", w))
+      const w = await ctx.s.get(actor.space, "warehouses", id);
+      if (!w || !(await ctx.allowed(actor, "warehouses", w)))
         reject(400, "Warehouse is not available in your scope");
     }
   }
@@ -228,7 +232,7 @@ export function registerOperations(ctx: FeatureContext) {
   const { app, s } = ctx;
   app.get(
     "/api/operations/summary",
-    route((req, res) => {
+    route(async (req, res) => {
       const result: any = {
         programmes: 0,
         seasons: 0,
@@ -256,11 +260,11 @@ export function registerOperations(ctx: FeatureContext) {
         "farmLocations",
         "payments",
       ] as Entity[]) {
-        for (const item of s.db
+        for await (const item of s.db
           .prepare("SELECT data FROM records WHERE space=? AND entity=?")
           .iterate(req.actor.space, entity) as any) {
           const r = JSON.parse(item.data);
-          if (!ctx.allowed(req.actor, entity, r)) continue;
+          if (!(await ctx.allowed(req.actor, entity, r))) continue;
           let include = true;
           for (const key of [
             "programId",
@@ -317,20 +321,20 @@ export function registerOperations(ctx: FeatureContext) {
   );
   app.get(
     "/api/operations/records/:entity",
-    route((req, res) => {
+    route(async (req, res) => {
       const entity = req.params.entity as Entity;
       if (!ENTITIES.includes(entity)) reject(404, "Unknown record collection");
       const limit = Math.min(1000, Math.max(1, Number(req.query.limit) || 25)),
         offset = Math.max(0, Number(req.query.offset) || 0);
       const rows: Row[] = [];
       let total = 0;
-      for (const item of s.db
+      for await (const item of s.db
         .prepare(
           "SELECT data FROM records WHERE space=? AND entity=? ORDER BY rowid DESC",
         )
         .iterate(req.actor.space, entity) as any) {
         const r = JSON.parse(item.data);
-        if (!ctx.allowed(req.actor, entity, r)) continue;
+        if (!(await ctx.allowed(req.actor, entity, r))) continue;
         if (
           entity === "interventions" &&
           r.farmerId &&
@@ -358,25 +362,25 @@ export function registerOperations(ctx: FeatureContext) {
   );
   app.get(
     "/api/operations/record/:entity/:id",
-    route((req, res) => {
+    route(async (req, res) => {
       const entity = req.params.entity as Entity;
       if (!ENTITIES.includes(entity)) reject(404, "Unknown collection");
-      const row = s.get(req.actor.space, entity, req.params.id);
-      if (!row || !ctx.allowed(req.actor, entity, row))
+      const row = await s.get(req.actor.space, entity, req.params.id);
+      if (!row || !(await ctx.allowed(req.actor, entity, row)))
         reject(404, "Record not found");
       res.json(publicRecord(row));
     }),
   );
   app.post(
     "/api/operations/cohorts/preview",
-    route((req, res) => {
+    route(async (req, res) => {
       if (!manager(req.actor))
         reject(403, "Only managers can assign beneficiary cohorts");
       const target = req.body.target || {},
         filters = { ...req.body.filters };
       if (typeof target.interventionId !== "string")
         reject(400, "Select an intervention");
-      const intervention = s.get(
+      const intervention = await s.get(
         req.actor.space,
         "interventions",
         target.interventionId,
@@ -392,28 +396,33 @@ export function registerOperations(ctx: FeatureContext) {
         programId: intervention.programId,
         seasonId: intervention.seasonId,
       };
-      validateLinks(ctx, req.actor, "participations", row);
-      if (!ctx.allowed(req.actor, "interventions", intervention))
+      await validateLinks(ctx, req.actor, "participations", row);
+      if (!(await ctx.allowed(req.actor, "interventions", intervention)))
         reject(403, "Intervention is outside your scope");
       if (filters.fieldValidated && !filters.validationSeasonId)
         filters.validationSeasonId = row.seasonId;
       const selection = whereCohort(ctx, req.actor, filters);
-      const matched = (
-        s.db
-          .prepare(`SELECT count(*) AS n FROM records WHERE ${selection.where}`)
-          .get(...selection.args) as any
-      ).n;
-      const candidates = s.db.prepare(
-        `SELECT id,data FROM records WHERE ${selection.where} ORDER BY rowid`,
-      );
-      if (matched > 250000)
-        reject(400, "Split this cohort into groups of at most 250,000 farmers");
       const jobId = randomUUID();
-      let eligible = 0,
+      let matched = 0,
+        eligible = 0,
         duplicates = 0;
       const sample: any[] = [];
-      s.transaction(() => {
-        s.db
+      await s.transaction(async () => {
+        if (s.db.kind === "postgres")
+          await s.db.exec("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ");
+        matched = (
+          await s.db
+            .prepare(
+              `SELECT count(*) AS n FROM records WHERE ${selection.where}`,
+            )
+            .get(...selection.args)
+        ).n;
+        if (matched > 250000)
+          reject(
+            400,
+            "Split this cohort into groups of at most 250,000 farmers",
+          );
+        await s.db
           .prepare(
             "INSERT INTO cohort_jobs(id,space,actor_id,target,filters,created) VALUES(?,?,?,?,?,?)",
           )
@@ -425,32 +434,31 @@ export function registerOperations(ctx: FeatureContext) {
             JSON.stringify(filters),
             new Date().toISOString(),
           );
-        const existing = new Set<string>();
-        for (const r of s.db
+        await s.db
           .prepare(
-            "SELECT json_extract(data,'$.farmerId') AS farmerId FROM records WHERE space=? AND entity='participations' AND json_extract(data,'$.interventionId')=? AND json_extract(data,'$.seasonId')=?",
+            `INSERT INTO cohort_members(job_id,farmer_id) SELECT ?,id FROM records WHERE (${selection.where}) AND NOT EXISTS(SELECT 1 FROM records p WHERE p.space=records.space AND p.entity='participations' AND json_extract(p.data,'$.farmerId')=records.id AND json_extract(p.data,'$.interventionId')=? AND json_extract(p.data,'$.seasonId')=?)`,
           )
-          .iterate(req.actor.space, row.interventionId, row.seasonId) as any)
-          existing.add(r.farmerId);
-        for (const c of candidates.iterate(...selection.args) as any) {
-          if (existing.has(c.id)) {
-            duplicates++;
-            continue;
-          }
-          s.db
-            .prepare("INSERT INTO cohort_members(job_id,farmer_id) VALUES(?,?)")
-            .run(jobId, c.id);
-          eligible++;
-          if (sample.length < 25) {
-            const f = JSON.parse(c.data);
-            sample.push({
-              id: f.id,
-              name: names(f),
-              farmerID: f.farmerID,
-              state: f.state,
-              crop: f.crop,
-            });
-          }
+          .run(jobId, ...selection.args, row.interventionId, row.seasonId);
+        eligible = (
+          await s.db
+            .prepare("SELECT count(*) AS n FROM cohort_members WHERE job_id=?")
+            .get(jobId)
+        ).n;
+        duplicates = matched - eligible;
+        const rows = await s.db
+          .prepare(
+            "SELECT r.data FROM cohort_members m JOIN records r ON r.id=m.farmer_id AND r.space=? AND r.entity='farmers' WHERE m.job_id=? ORDER BY r.rowid LIMIT 25",
+          )
+          .all(req.actor.space, jobId);
+        for (const item of rows) {
+          const f = JSON.parse(item.data);
+          sample.push({
+            id: f.id,
+            name: names(f),
+            farmerID: f.farmerID,
+            state: f.state,
+            crop: f.crop,
+          });
         }
       });
       res.json({ jobId, matched, eligible, duplicates, sample, target: row });
@@ -458,34 +466,34 @@ export function registerOperations(ctx: FeatureContext) {
   );
   app.post(
     "/api/operations/cohorts/:id/commit",
-    route((req, res) => {
+    route(async (req, res) => {
       if (!manager(req.actor)) reject(403, "Only managers can assign cohorts");
-      const job = s.db
+      const job = (await s.db
         .prepare(
           "SELECT * FROM cohort_jobs WHERE id=? AND space=? AND actor_id=?",
         )
-        .get(req.params.id, req.actor.space, req.actor.id) as any;
+        .get(req.params.id, req.actor.space, req.actor.id)) as any;
       if (!job) reject(404, "Cohort preview unavailable");
       const target = JSON.parse(job.target);
-      validateLinks(ctx, req.actor, "participations", target);
-      const pending = s.db
+      await validateLinks(ctx, req.actor, "participations", target);
+      const pending = (await s.db
         .prepare(
           "SELECT farmer_id FROM cohort_members WHERE job_id=? AND status='Pending' LIMIT 500",
         )
-        .all(job.id) as any[];
+        .all(job.id)) as any[];
       let enrolled = 0;
-      s.transaction(() => {
+      await s.transaction(async () => {
         for (const entry of pending) {
-          const f = s.get(req.actor.space, "farmers", entry.farmer_id);
-          if (!f || !ctx.allowed(req.actor, "farmers", f)) {
-            s.db
+          const f = await s.get(req.actor.space, "farmers", entry.farmer_id);
+          if (!f || !(await ctx.allowed(req.actor, "farmers", f))) {
+            await s.db
               .prepare(
                 "UPDATE cohort_members SET status='Rejected',reason='Farmer no longer in assigned scope' WHERE job_id=? AND farmer_id=?",
               )
               .run(job.id, entry.farmer_id);
             continue;
           }
-          const exists = s.db
+          const exists = await s.db
             .prepare(
               "SELECT id FROM records WHERE space=? AND entity='participations' AND json_extract(data,'$.farmerId')=? AND json_extract(data,'$.interventionId')=? AND json_extract(data,'$.seasonId')=?",
             )
@@ -493,7 +501,7 @@ export function registerOperations(ctx: FeatureContext) {
           if (!exists) {
             const filter = JSON.parse(job.filters);
             const evidence = filter.fieldValidated
-              ? (s.db
+              ? ((await s.db
                   .prepare(
                     "SELECT data FROM records WHERE space=? AND entity='fieldValidations' AND json_extract(data,'$.farmerId')=? AND json_extract(data,'$.status')='Verified' AND json_extract(data,'$.seasonId')=? ORDER BY rowid DESC LIMIT 1",
                   )
@@ -501,10 +509,10 @@ export function registerOperations(ctx: FeatureContext) {
                     req.actor.space,
                     f.id,
                     filter.validationSeasonId || target.seasonId,
-                  ) as any)
+                  )) as any)
               : null;
             if (filter.fieldValidated && !evidence) {
-              s.db
+              await s.db
                 .prepare(
                   "UPDATE cohort_members SET status='Rejected',reason='Approved field evidence no longer available' WHERE job_id=? AND farmer_id=?",
                 )
@@ -534,17 +542,17 @@ export function registerOperations(ctx: FeatureContext) {
                   }
                 : {}),
             };
-            s.put(req.actor.space, "participations", record);
+            await s.put(req.actor.space, "participations", record);
             enrolled++;
           }
-          s.db
+          await s.db
             .prepare(
               "UPDATE cohort_members SET status=? WHERE job_id=? AND farmer_id=?",
             )
             .run(exists ? "Duplicate" : "Enrolled", job.id, f.id);
         }
         if (pending.length)
-          s.audit(
+          await s.audit(
             req.actor,
             "BULK_ENROL",
             "interventions",
@@ -552,11 +560,11 @@ export function registerOperations(ctx: FeatureContext) {
             `Assigned ${enrolled} beneficiaries from reviewed cohort`,
           );
       });
-      const counts = s.db
+      const counts = (await s.db
         .prepare(
           "SELECT status,count(*) AS count FROM cohort_members WHERE job_id=? GROUP BY status",
         )
-        .all(job.id) as any[];
+        .all(job.id)) as any[];
       res.json({
         enrolled,
         remaining: counts.find((r) => r.status === "Pending")?.count || 0,
@@ -566,7 +574,7 @@ export function registerOperations(ctx: FeatureContext) {
   );
   app.get(
     "/api/history/:entity/:id",
-    route((req, res) => {
+    route(async (req, res) => {
       const entity = req.params.entity as Entity,
         id = req.params.id;
       const stateView = (entity as string) === "states";
@@ -574,8 +582,11 @@ export function registerOperations(ctx: FeatureContext) {
         reject(404, "Unknown history scope");
       const root = stateView
         ? { id, name: id }
-        : s.get(req.actor.space, entity, id);
-      if (!root || (!stateView && !ctx.allowed(req.actor, entity, root)))
+        : await s.get(req.actor.space, entity, id);
+      if (
+        !root ||
+        (!stateView && !(await ctx.allowed(req.actor, entity, root)))
+      )
         reject(404, "Record not found");
       if (
         stateView &&
@@ -584,19 +595,19 @@ export function registerOperations(ctx: FeatureContext) {
         !req.actor.states.includes(id)
       )
         reject(403, "State outside assigned scope");
-      const select = (
+      const select = async (
         collection: Entity,
         predicate: (r: Row) => boolean,
         limit = 1000,
       ) => {
         const out: Row[] = [];
-        for (const item of s.db
+        for await (const item of s.db
           .prepare(
             "SELECT data FROM records WHERE space=? AND entity=? ORDER BY rowid DESC",
           )
           .iterate(req.actor.space, collection) as any) {
           const r = JSON.parse(item.data);
-          if (predicate(r) && ctx.allowed(req.actor, collection, r))
+          if (predicate(r) && (await ctx.allowed(req.actor, collection, r)))
             out.push(r);
           if (out.length >= limit) break;
         }
@@ -604,7 +615,7 @@ export function registerOperations(ctx: FeatureContext) {
       };
       const farmerParticipations =
         entity === "farmers"
-          ? select("participations", (p) => p.farmerId === id)
+          ? await select("participations", (p) => p.farmerId === id)
           : [];
       const farmerInterventions = new Set(
           farmerParticipations.map((p) => p.interventionId),
@@ -626,11 +637,11 @@ export function registerOperations(ctx: FeatureContext) {
         entity === "organizations"
           ? new Set(
               (
-                s.db
+                (await s.db
                   .prepare(
                     "SELECT id FROM records WHERE space=? AND entity='farmers' AND json_extract(data,'$.organizationId')=?",
                   )
-                  .all(req.actor.space, id) as any[]
+                  .all(req.actor.space, id)) as any[]
               ).map((f) => f.id),
             )
           : new Set();
@@ -646,7 +657,7 @@ export function registerOperations(ctx: FeatureContext) {
         "seasons",
         "programs",
       ] as Entity[]) {
-        const rows = select(
+        const rows = await select(
           e,
           (r) =>
             (key && r[key] === id) ||
@@ -670,25 +681,24 @@ export function registerOperations(ctx: FeatureContext) {
         related[e] = rows.map(publicRecord);
       }
       const versions = (
-        s.db
+        (await s.db
           .prepare(
             "SELECT version,action,recorded_at AS recordedAt,actor_name AS actorName,data FROM record_history WHERE space=? AND entity=? AND record_id=? ORDER BY version DESC LIMIT 100",
           )
-          .all(req.actor.space, entity, id) as any[]
+          .all(req.actor.space, entity, id)) as any[]
       ).map((v) => ({ ...v, data: publicRecord(JSON.parse(v.data)) }));
       res.json({
         record: publicRecord(root),
         related,
         versions,
-        linkedFarmers: [...linkedFarmerIds]
-          .slice(0, 100)
-          .map((fid) => {
-            const f = s.get(req.actor.space, "farmers", fid);
+        linkedFarmers: (
+          await asyncMap([...linkedFarmerIds].slice(0, 100), async (fid) => {
+            const f = await s.get(req.actor.space, "farmers", fid);
             return f
               ? { id: f.id, name: names(f), farmerID: f.farmerID }
               : null;
           })
-          .filter(Boolean),
+        ).filter(Boolean),
         limits: { relatedPerCollection: 1000, versions: 100 },
         baselineNotice:
           "Only captured observations and revisions are shown; earlier unrecorded history is not invented.",
@@ -697,7 +707,7 @@ export function registerOperations(ctx: FeatureContext) {
   );
   app.post(
     "/api/operations/participations/status",
-    route((req, res) => {
+    route(async (req, res) => {
       if (!manager(req.actor))
         reject(403, "A manager must confirm cohort delivery");
       if (
@@ -706,27 +716,27 @@ export function registerOperations(ctx: FeatureContext) {
         )
       )
         reject(400, "Choose a valid delivery status");
-      const intervention = s.get(
+      const intervention = await s.get(
         req.actor.space,
         "interventions",
         req.body.interventionId,
       );
       if (
         !intervention ||
-        !ctx.allowed(req.actor, "interventions", intervention)
+        !(await ctx.allowed(req.actor, "interventions", intervention))
       )
         reject(404, "Intervention unavailable");
       let updated = 0;
-      const candidates = s.db
+      const candidates = (await s.db
         .prepare(
           "SELECT data FROM records WHERE space=? AND entity='participations' AND json_extract(data,'$.interventionId')=? AND json_extract(data,'$.status')<>? LIMIT 500",
         )
-        .all(req.actor.space, intervention.id, req.body.status) as any[];
-      s.transaction(() => {
+        .all(req.actor.space, intervention.id, req.body.status)) as any[];
+      await s.transaction(async () => {
         for (const item of candidates) {
           const r = JSON.parse(item.data);
-          if (!ctx.allowed(req.actor, "participations", r)) continue;
-          s.put(req.actor.space, "participations", {
+          if (!(await ctx.allowed(req.actor, "participations", r))) continue;
+          await s.put(req.actor.space, "participations", {
             ...r,
             status: req.body.status,
             statusDate: new Date().toISOString(),
@@ -735,7 +745,7 @@ export function registerOperations(ctx: FeatureContext) {
           });
           updated++;
         }
-        s.audit(
+        await s.audit(
           req.actor,
           "COHORT_STATUS",
           "interventions",
@@ -746,35 +756,34 @@ export function registerOperations(ctx: FeatureContext) {
       res.json({
         updated,
         remaining: (
-          s.db
+          (await s.db
             .prepare(
               "SELECT count(*) AS n FROM records WHERE space=? AND entity='participations' AND json_extract(data,'$.interventionId')=? AND json_extract(data,'$.status')<>?",
             )
-            .get(req.actor.space, intervention.id, req.body.status) as any
+            .get(req.actor.space, intervention.id, req.body.status)) as any
         ).n,
       });
     }),
   );
   app.get(
     "/api/operations/calendar",
-    route((req, res) => {
+    route(async (req, res) => {
       const month = String(req.query.month || "");
       if (!/^\d{4}-\d{2}$/.test(month)) reject(400, "Month must be YYYY-MM");
-      const tasks = s
-        .all(req.actor.space, "harvestTasks")
-        .filter(
-          (t) =>
-            ctx.allowed(req.actor, "harvestTasks", t) &&
-            t.startDate <= month + "-31" &&
-            t.endDate >= month + "-01" &&
-            (!req.query.seasonId || t.seasonId === req.query.seasonId),
-        );
+      const tasks = await asyncFilter(
+        await s.all(req.actor.space, "harvestTasks"),
+        async (t) =>
+          (await ctx.allowed(req.actor, "harvestTasks", t)) &&
+          t.startDate <= month + "-31" &&
+          t.endDate >= month + "-01" &&
+          (!req.query.seasonId || t.seasonId === req.query.seasonId),
+      );
       res.json(tasks.map(publicRecord));
     }),
   );
   app.get(
     "/api/operations/calendar.ics",
-    route((req, res) => {
+    route(async (req, res) => {
       const escape = (v: any) =>
         String(v || "")
           .replace(/\\/g, "\\\\")
@@ -784,13 +793,12 @@ export function registerOperations(ctx: FeatureContext) {
         .toISOString()
         .replace(/[-:]/g, "")
         .replace(/\.\d{3}/, "");
-      const events = s
-        .all(req.actor.space, "harvestTasks")
-        .filter(
-          (t) =>
-            ctx.allowed(req.actor, "harvestTasks", t) &&
-            (!req.query.seasonId || t.seasonId === req.query.seasonId),
-        );
+      const events = await asyncFilter(
+        await s.all(req.actor.space, "harvestTasks"),
+        async (t) =>
+          (await ctx.allowed(req.actor, "harvestTasks", t)) &&
+          (!req.query.seasonId || t.seasonId === req.query.seasonId),
+      );
       const lines = [
         "BEGIN:VCALENDAR",
         "VERSION:2.0",
@@ -834,7 +842,7 @@ export function registerOperations(ctx: FeatureContext) {
           403,
           "Original source exports require an administrator or an unrestricted import reviewer",
         );
-      const batch = s.get(req.actor.space, "imports", req.params.id);
+      const batch = await s.get(req.actor.space, "imports", req.params.id);
       if (!batch) reject(404, "Import not found");
       const quote = (v: any) =>
         '"' +
@@ -850,7 +858,7 @@ export function registerOperations(ctx: FeatureContext) {
             .join(",") +
           "\r\n",
       );
-      for (const row of s.db
+      for await (const row of s.db
         .prepare(
           "SELECT source_row,status,reason,raw FROM source_records WHERE space=? AND batch_id=? AND status<>'Imported' ORDER BY source_row",
         )
@@ -865,7 +873,7 @@ export function registerOperations(ctx: FeatureContext) {
         )
           await once(res, "drain");
       }
-      s.audit(
+      await s.audit(
         req.actor,
         "EXPORT",
         "imports",

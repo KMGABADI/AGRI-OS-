@@ -1,6 +1,6 @@
-import { DatabaseSync } from "node:sqlite";
-import { mkdirSync } from "node:fs";
-import path from "node:path";
+import { asyncEach } from "./db/async-collections";
+import { openPostgres, openSqlite } from "./db/driver";
+import { POSTGRES_SCHEMA } from "./db/schema";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import {
@@ -9,15 +9,25 @@ import {
   type Row,
   type Session,
 } from "../src/model";
-
-export function openDatabase(filename: string) {
-  if (filename !== ":memory:")
-    mkdirSync(path.dirname(path.resolve(filename)), {
-      recursive: true,
-      mode: 0o700,
-    });
-  const db = new DatabaseSync(filename);
-  db.exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;
+export async function openDatabase(
+  filename: string,
+  options: { migrate?: boolean } = {},
+) {
+  const db =
+    filename.startsWith("postgres://") || filename.startsWith("postgresql://")
+      ? await openPostgres(filename)
+      : await openSqlite(filename);
+  try {
+    if (
+      db.kind === "postgres" &&
+      (options.migrate ?? process.env.DATABASE_AUTO_MIGRATE !== "false")
+    )
+      await db.locked(
+        "rifan-schema-migration",
+        async () => await db.exec(POSTGRES_SCHEMA),
+      );
+    else if (db.kind === "sqlite") {
+      await db.exec(`
     CREATE TABLE IF NOT EXISTS records (space TEXT NOT NULL, entity TEXT NOT NULL, id TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY(space,entity,id));
     CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, space TEXT NOT NULL, email TEXT NOT NULL, name TEXT NOT NULL, role TEXT NOT NULL, hash TEXT NOT NULL, salt TEXT NOT NULL, scope TEXT NOT NULL DEFAULT '{}', UNIQUE(space,email));
     CREATE TABLE IF NOT EXISTS sessions (token TEXT PRIMARY KEY, user_id TEXT NOT NULL, space TEXT NOT NULL, expires INTEGER NOT NULL, data TEXT NOT NULL);
@@ -33,7 +43,7 @@ export function openDatabase(filename: string) {
     CREATE INDEX IF NOT EXISTS farmer_state ON records(space,json_extract(data,'$.state')) WHERE entity='farmers';
     CREATE TABLE IF NOT EXISTS integrations (space TEXT NOT NULL, user_id TEXT NOT NULL, access_token TEXT NOT NULL, refresh_token TEXT, expires INTEGER, PRIMARY KEY(space,user_id));
   `);
-  db.exec(`CREATE TABLE IF NOT EXISTS record_history (version INTEGER PRIMARY KEY AUTOINCREMENT, space TEXT NOT NULL, entity TEXT NOT NULL, record_id TEXT NOT NULL, data TEXT NOT NULL, action TEXT NOT NULL, recorded_at TEXT NOT NULL, actor_id TEXT, actor_name TEXT);
+      await db.exec(`CREATE TABLE IF NOT EXISTS record_history (version INTEGER PRIMARY KEY AUTOINCREMENT, space TEXT NOT NULL, entity TEXT NOT NULL, record_id TEXT NOT NULL, data TEXT NOT NULL, action TEXT NOT NULL, recorded_at TEXT NOT NULL, actor_id TEXT, actor_name TEXT);
 CREATE INDEX IF NOT EXISTS history_record ON record_history(space,entity,record_id,version);
 CREATE TABLE IF NOT EXISTS cohort_jobs(id TEXT PRIMARY KEY,space TEXT NOT NULL,actor_id TEXT NOT NULL,target TEXT NOT NULL,filters TEXT NOT NULL,created TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS cohort_members(job_id TEXT NOT NULL,farmer_id TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'Pending',reason TEXT,PRIMARY KEY(job_id,farmer_id));
@@ -43,119 +53,184 @@ CREATE UNIQUE INDEX IF NOT EXISTS participation_unique ON records(space,json_ext
 CREATE INDEX IF NOT EXISTS site_farmer ON records(space,json_extract(data,'$.farmerId')) WHERE entity='farmLocations';
 CREATE INDEX IF NOT EXISTS validation_farmer ON records(space,json_extract(data,'$.farmerId')) WHERE entity='fieldValidations';
 CREATE TABLE IF NOT EXISTS otp_challenges(id TEXT PRIMARY KEY,user_id TEXT NOT NULL,space TEXT NOT NULL,purpose TEXT NOT NULL,hash TEXT NOT NULL,salt TEXT NOT NULL,expires INTEGER NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,created INTEGER NOT NULL);`);
-  const columns = new Set(
-    (db.prepare("PRAGMA table_info(users)").all() as any[]).map((r) => r.name),
-  );
-  for (const column of ["twofa_enabled", "twofa_required"])
-    if (!columns.has(column))
-      db.exec(
-        `ALTER TABLE users ADD COLUMN ${column} INTEGER NOT NULL DEFAULT 0`,
+      const columns = new Set(
+        ((await db.prepare("PRAGMA table_info(users)").all()) as any[]).map(
+          (r) => r.name,
+        ),
       );
-  if (
-    !(db.prepare("PRAGMA table_info(source_records)").all() as any[]).some(
-      (c) => c.name === "submitted",
-    )
-  )
-    db.exec("ALTER TABLE source_records ADD COLUMN submitted TEXT");
-  db.exec(
-    `CREATE TABLE IF NOT EXISTS oauth_states(state_hash TEXT PRIMARY KEY,user_id TEXT NOT NULL,space TEXT NOT NULL,expires INTEGER NOT NULL,redirect_uri TEXT NOT NULL,verifier TEXT NOT NULL,scopes TEXT NOT NULL); CREATE INDEX IF NOT EXISTS oauth_expiry ON oauth_states(expires);`,
-  );
-  const integrationColumns = new Set(
-    (db.prepare("PRAGMA table_info(integrations)").all() as any[]).map(
-      (c) => c.name,
-    ),
-  );
-  for (const column of ["client_id", "scopes"])
-    if (!integrationColumns.has(column))
-      db.exec(`ALTER TABLE integrations ADD COLUMN ${column} TEXT`);
+      for (const column of ["twofa_enabled", "twofa_required"])
+        if (!columns.has(column))
+          await db.exec(
+            `ALTER TABLE users ADD COLUMN ${column} INTEGER NOT NULL DEFAULT 0`,
+          );
+      if (
+        !(
+          (await db.prepare("PRAGMA table_info(source_records)").all()) as any[]
+        ).some((c) => c.name === "submitted")
+      )
+        await db.exec("ALTER TABLE source_records ADD COLUMN submitted TEXT");
+      await db.exec(
+        `CREATE TABLE IF NOT EXISTS oauth_states(state_hash TEXT PRIMARY KEY,user_id TEXT NOT NULL,space TEXT NOT NULL,expires INTEGER NOT NULL,redirect_uri TEXT NOT NULL,verifier TEXT NOT NULL,scopes TEXT NOT NULL); CREATE INDEX IF NOT EXISTS oauth_expiry ON oauth_states(expires);`,
+      );
+      const integrationColumns = new Set(
+        (
+          (await db.prepare("PRAGMA table_info(integrations)").all()) as any[]
+        ).map((c) => c.name),
+      );
+      for (const column of ["client_id", "scopes"])
+        if (!integrationColumns.has(column))
+          await db.exec(`ALTER TABLE integrations ADD COLUMN ${column} TEXT`);
+      const userColumns = new Set(
+        (await db.prepare("PRAGMA table_info(users)").all()).map((c) => c.name),
+      );
+      if (!userColumns.has("must_change_password"))
+        await db.exec(
+          "ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0",
+        );
+      await db.exec(
+        "CREATE TABLE IF NOT EXISTS auth_attempts(key TEXT PRIMARY KEY,attempts INTEGER NOT NULL,until INTEGER NOT NULL)",
+      );
+    }
+    if (db.kind === "sqlite")
+      await db.exec(
+        "CREATE TABLE IF NOT EXISTS bootstrap_admin(space TEXT PRIMARY KEY,user_id TEXT NOT NULL)",
+      );
+    if (
+      db.kind === "postgres" &&
+      !(options.migrate ?? process.env.DATABASE_AUTO_MIGRATE !== "false")
+    ) {
+      const ready = await db
+        .prepare(
+          "SELECT to_regclass('public.records') AS records,to_regclass('public.users') AS users,to_regclass('public.bootstrap_admin') AS bootstrap",
+        )
+        .get();
+      if (!ready.records || !ready.users || !ready.bootstrap)
+        throw new Error(
+          "PostgreSQL schema is missing. Run migration with the migration administrator before starting the application user.",
+        );
+    }
+  } catch (error) {
+    await db.close();
+    throw error;
+  }
   const actors = new AsyncLocalStorage<Session>();
   const withActor = <T>(actor: Session, callback: () => T) =>
     actors.run(actor, callback);
-  const history = (
+  const history = async (
     space: string,
     entity: Entity,
     data: Row,
     action: string,
   ) => {
     const actor = actors.getStore();
-    db.prepare(
-      "INSERT INTO record_history(space,entity,record_id,data,action,recorded_at,actor_id,actor_name) VALUES(?,?,?,?,?,?,?,?)",
-    ).run(
-      space,
-      entity,
-      data.id,
-      JSON.stringify(data),
-      action,
-      new Date().toISOString(),
-      actor?.id || "system",
-      actor?.name || "System",
-    );
+    await db
+      .prepare(
+        "INSERT INTO record_history(space,entity,record_id,data,action,recorded_at,actor_id,actor_name) VALUES(?,?,?,?,?,?,?,?)",
+      )
+      .run(
+        space,
+        entity,
+        data.id,
+        JSON.stringify(data),
+        action,
+        new Date().toISOString(),
+        actor?.id || "system",
+        actor?.name || "System",
+      );
   };
   let revision = 0;
-  const version = () =>
-    String((db.prepare("PRAGMA data_version").get() as any).data_version) +
-    ":" +
-    revision;
-  const all = (space: string, entity: Entity): Row[] =>
+  const version = async () =>
+    db.kind === "postgres"
+      ? String(await db.revision())
+      : String(await db.revision()) + ":" + revision;
+  const all = async (space: string, entity: Entity): Promise<Row[]> =>
     (
-      db
+      (await db
         .prepare(
           "SELECT data FROM records WHERE space=? AND entity=? ORDER BY rowid DESC",
         )
-        .all(space, entity) as any[]
+        .all(space, entity)) as any[]
     ).map((r) => JSON.parse(r.data));
-  const get = (space: string, entity: Entity, id: string): Row | undefined => {
-    const r = db
+  const get = async (
+    space: string,
+    entity: Entity,
+    id: string,
+  ): Promise<Row | undefined> => {
+    const r = (await db
       .prepare("SELECT data FROM records WHERE space=? AND entity=? AND id=?")
-      .get(space, entity, id) as any;
+      .get(space, entity, id)) as any;
     return r ? JSON.parse(r.data) : undefined;
   };
-  const put = (space: string, entity: Entity, data: Row) => {
-    if (entity === "farmers") revision++;
-    const previous = get(space, entity, data.id);
-    if (
-      previous &&
-      !db
+  const put = async (space: string, entity: Entity, input: Row) => {
+    const operation = async () => {
+      const data = { ...input };
+      const expected = data.expectedUpdatedAt;
+      delete data.expectedUpdatedAt;
+      const selected = await db
         .prepare(
-          "SELECT version FROM record_history WHERE space=? AND entity=? AND record_id=? LIMIT 1",
+          "SELECT data FROM records WHERE space=? AND entity=? AND id=?" +
+            (db.kind === "postgres" ? " FOR UPDATE" : ""),
         )
-        .get(space, entity, data.id)
-    )
-      history(
-        space,
-        entity,
-        previous,
-        "Baseline (earlier revisions unavailable)",
-      );
-    if (!previous || JSON.stringify(previous) !== JSON.stringify(data))
-      history(space, entity, data, previous ? "Updated" : "Created");
-    db.prepare(
-      "INSERT INTO records(space,entity,id,data) VALUES(?,?,?,?) ON CONFLICT(space,entity,id) DO UPDATE SET data=excluded.data",
-    ).run(space, entity, data.id, JSON.stringify(data));
-    return data;
+        .get(space, entity, data.id);
+      const previous = selected ? JSON.parse(selected.data) : undefined;
+      if (
+        expected !== undefined &&
+        expected !== (previous?.updatedAt || previous?.createdAt || "")
+      )
+        throw Object.assign(
+          new Error(
+            "This record changed since it was opened. Reload before editing.",
+          ),
+          { status: 409 },
+        );
+      if (
+        previous &&
+        !(await db
+          .prepare(
+            "SELECT version FROM record_history WHERE space=? AND entity=? AND record_id=? LIMIT 1",
+          )
+          .get(space, entity, data.id))
+      )
+        await history(
+          space,
+          entity,
+          previous,
+          "Baseline (earlier revisions unavailable)",
+        );
+      if (!previous || JSON.stringify(previous) !== JSON.stringify(data))
+        await history(space, entity, data, previous ? "Updated" : "Created");
+      await db
+        .prepare(
+          "INSERT INTO records(space,entity,id,data) VALUES(?,?,?,?) ON CONFLICT(space,entity,id) DO UPDATE SET data=excluded.data",
+        )
+        .run(space, entity, data.id, JSON.stringify(data));
+      if (entity === "farmers") revision++;
+      return data;
+    };
+    return db.inTransaction() ? operation() : db.transaction(operation);
   };
-  const remove = (space: string, entity: Entity, id: string) => {
+  const remove = async (space: string, entity: Entity, id: string) => {
     if (entity === "farmers") revision++;
-    const previous = get(space, entity, id);
-    if (previous) history(space, entity, previous, "Deleted");
-    return db
+    const previous = await get(space, entity, id);
+    if (previous) await history(space, entity, previous, "Deleted");
+    return await db
       .prepare("DELETE FROM records WHERE space=? AND entity=? AND id=?")
       .run(space, entity, id);
   };
-  const settings = (space: string) => {
-    const r = db
+  const settings = async (space: string) => {
+    const r = (await db
       .prepare("SELECT data FROM settings WHERE space=?")
-      .get(space) as any;
+      .get(space)) as any;
     return { ...DEFAULT_SETTINGS, ...(r ? JSON.parse(r.data) : {}) };
   };
-  const audit = (
+  const audit = async (
     session: Session,
     action: string,
     entity: string,
     id: string,
     details: string,
   ) =>
-    db
+    await db
       .prepare(
         "INSERT INTO audit(space,user_id,user_name,action,entity,entity_id,details,timestamp) VALUES(?,?,?,?,?,?,?,?)",
       )
@@ -169,17 +244,7 @@ CREATE TABLE IF NOT EXISTS otp_challenges(id TEXT PRIMARY KEY,user_id TEXT NOT N
         details,
         new Date().toISOString(),
       );
-  const transaction = <T>(fn: () => T): T => {
-    db.exec("BEGIN IMMEDIATE");
-    try {
-      const out = fn();
-      db.exec("COMMIT");
-      return out;
-    } catch (e) {
-      db.exec("ROLLBACK");
-      throw e;
-    }
-  };
+  const transaction = <T>(fn: () => Promise<T> | T) => db.transaction(fn);
   return {
     db,
     all,
@@ -191,12 +256,12 @@ CREATE TABLE IF NOT EXISTS otp_challenges(id TEXT PRIMARY KEY,user_id TEXT NOT N
     transaction,
     version,
     withActor,
+    locked: db.locked,
   };
 }
-export type Store = ReturnType<typeof openDatabase>;
-
-export function seedDemo(s: Store) {
-  if (s.get("demo", "organizations", "org-kebbi")) return;
+export type Store = Awaited<ReturnType<typeof openDatabase>>;
+export async function seedDemo(s: Store) {
+  if (await s.get("demo", "organizations", "org-kebbi")) return;
   const today = new Date();
   const day = (offset: number) => {
     const d = new Date(today);
@@ -241,10 +306,10 @@ export function seedDemo(s: Store) {
     "Oche",
     "Umar",
   ];
-  s.transaction(() => {
-    regions.forEach(([state, lga, lat, lng], i) => {
+  await s.transaction(async () => {
+    await asyncEach(regions, async ([state, lga, lat, lng], i) => {
       const orgId = "org-" + state.toLowerCase();
-      s.put("demo", "organizations", {
+      await s.put("demo", "organizations", {
         id: orgId,
         name: `RIFAN ${state} Cooperative`,
         type: "Cooperative",
@@ -256,7 +321,7 @@ export function seedDemo(s: Store) {
         status: "Active",
       });
       if (i < 4)
-        s.put("demo", "warehouses", {
+        await s.put("demo", "warehouses", {
           id: "wh-" + i,
           name: `${state} Grain Reserve`,
           state,
@@ -269,7 +334,7 @@ export function seedDemo(s: Store) {
           status: i === 3 ? "Maintenance" : "Active",
         });
     });
-    s.put("demo", "programs", {
+    await s.put("demo", "programs", {
       id: "pr-wet",
       name: "Wet Season Rice Programme",
       description:
@@ -280,7 +345,7 @@ export function seedDemo(s: Store) {
       endDate: day(25),
       target: 120,
     });
-    s.put("demo", "programs", {
+    await s.put("demo", "programs", {
       id: "pr-dry",
       name: "Dry Season Irrigation Initiative",
       description: "Preparing farmers for efficient dry season production.",
@@ -292,7 +357,7 @@ export function seedDemo(s: Store) {
     });
     for (let i = 0; i < 84; i++) {
       const [state, lga, lat, lng] = regions[i % regions.length];
-      s.put("demo", "farmers", {
+      await s.put("demo", "farmers", {
         id: "demo-farmer-" + i,
         farmerID: `RIFAN-${state.slice(0, 3).toUpperCase()}-${String(i + 1).padStart(5, "0")}`,
         firstName: first[i % first.length],
@@ -324,7 +389,7 @@ export function seedDemo(s: Store) {
       });
     }
     for (let i = 0; i < 16; i++)
-      s.put("demo", "interventions", {
+      await s.put("demo", "interventions", {
         id: "inv-" + i,
         name: [
           "Improved rice seed distribution",
@@ -342,7 +407,7 @@ export function seedDemo(s: Store) {
           i % 4 === 0 ? "Planned" : i % 3 === 0 ? "In Progress" : "Completed",
         impactScore: i % 3 === 0 ? undefined : 65 + i,
       });
-    s.put("demo", "resources", {
+    await s.put("demo", "resources", {
       id: "res-1",
       farmerId: "demo-farmer-1",
       name: "FARO 44 certified rice seed",
@@ -350,7 +415,7 @@ export function seedDemo(s: Store) {
       quantity: 50,
       unit: "kg",
     });
-    s.put("demo", "alerts", {
+    await s.put("demo", "alerts", {
       id: "alert-1",
       title: "Harvest readiness assessment",
       message:
@@ -360,7 +425,7 @@ export function seedDemo(s: Store) {
       status: "Open",
       dueDate: day(3),
     });
-    s.put("demo", "alerts", {
+    await s.put("demo", "alerts", {
       id: "alert-2",
       title: "Membership verification",
       message:
@@ -370,7 +435,7 @@ export function seedDemo(s: Store) {
       status: "Open",
       dueDate: day(7),
     });
-    s.put("demo", "templates", {
+    await s.put("demo", "templates", {
       id: "template-default",
       name: "RIFAN member registration",
       mapping: JSON.stringify({
@@ -383,7 +448,7 @@ export function seedDemo(s: Store) {
       }),
       requiredFields: "firstName,lastName,primaryPhone,state,lga",
     });
-    s.put("demo", "widgets", {
+    await s.put("demo", "widgets", {
       id: "widget-gender",
       name: "Membership by gender",
       type: "pie",
@@ -402,7 +467,7 @@ export function seedDemo(s: Store) {
       space: "demo",
       demo: true,
     };
-    s.audit(
+    await s.audit(
       demo,
       "SETUP",
       "workspace",

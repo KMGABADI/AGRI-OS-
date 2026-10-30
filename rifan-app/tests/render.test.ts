@@ -1,23 +1,21 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { createApi } from "../server/api";
+import { createTestApi as createApi } from "./database";
 import { runtimeConfig, appRoot } from "../server/runtime";
 import path from "node:path";
-
 process.env.NODE_ENV = "production";
 process.env.RENDER = "true";
 process.env.RENDER_EXTERNAL_URL = "https://rifan-render.example.test";
 delete process.env.PUBLIC_URL;
 delete process.env.COOKIE_SECURE;
-const { app, store } = createApi({ filename: ":memory:" });
+const { app, store } = await createApi({ filename: ":memory:" });
 const server = app.listen(0, "127.0.0.1");
 await new Promise<void>((resolve) => server.once("listening", resolve));
 const base = `http://127.0.0.1:${(server.address() as any).port}`;
 after(async () => {
   await new Promise<void>((resolve) => server.close(() => resolve()));
-  store.db.close();
+  await store.db.close();
 });
-
 test("runtime anchors assets and the default database to the application, independent of cwd", () => {
   const config = runtimeConfig({ PORT: "10000" });
   assert.equal(config.port, 10000);

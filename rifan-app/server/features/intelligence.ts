@@ -94,7 +94,12 @@ export function analyse(input: {
   );
   const groups = new Map<
     string,
-    { kg: number; ha: number; crop: string; state: string }
+    {
+      kg: number;
+      ha: number;
+      crop: string;
+      state: string;
+    }
   >();
   for (const t of input.tasks) {
     if (
@@ -156,21 +161,21 @@ export function analyse(input: {
       "Decision support, not a guaranteed prediction. Confirm agronomic interventions with qualified extension officers.",
   };
 }
-export function intelligenceFor(
+export async function intelligenceFor(
   ctx: FeatureContext,
   actor: any,
   filters: any = {},
 ) {
-  const filtered = (entity: any) => {
+  const filtered = async (entity: any) => {
     const rows: Row[] = [];
-    for (const item of ctx.s.db
+    for await (const item of ctx.s.db
       .prepare(
         "SELECT data FROM records WHERE space=? AND entity=? ORDER BY rowid DESC",
       )
       .iterate(actor.space, entity) as any) {
       const r = JSON.parse(item.data);
       if (
-        ctx.allowed(actor, entity, r) &&
+        (await ctx.allowed(actor, entity, r)) &&
         (!filters.programId || r.programId === filters.programId) &&
         (!filters.seasonId || r.seasonId === filters.seasonId) &&
         (!filters.interventionId ||
@@ -189,35 +194,39 @@ export function intelligenceFor(
     crop: filters.crop,
   });
   const farmers = (
-    ctx.s.db
+    (await ctx.s.db
       .prepare(
         `SELECT data FROM records WHERE ${where} ${filters.farmerId ? "AND id=?" : ""} LIMIT 1000`,
       )
       .all(
         ...args,
         ...(filters.farmerId ? [String(filters.farmerId)] : []),
-      ) as any[]
+      )) as any[]
   ).map((r) => JSON.parse(r.data));
   return analyse({
     farmers,
-    locations: filtered("farmLocations"),
-    tasks: filtered("harvestTasks"),
-    validations: filtered("fieldValidations"),
-    participations: filtered("participations"),
-    seasons: filtered("seasons"),
+    locations: await filtered("farmLocations"),
+    tasks: await filtered("harvestTasks"),
+    validations: await filtered("fieldValidations"),
+    participations: await filtered("participations"),
+    seasons: await filtered("seasons"),
   });
 }
 export function registerIntelligence(ctx: FeatureContext) {
-  ctx.app.get("/api/intelligence", (req: any, res, next) => {
+  ctx.app.get("/api/intelligence", async (req: any, res, next) => {
     try {
-      res.json(intelligenceFor(ctx, req.actor, req.query));
+      res.json(await intelligenceFor(ctx, req.actor, req.query));
     } catch (e) {
       next(e);
     }
   });
-  ctx.app.post("/api/intelligence/advice", (req: any, res, next) => {
+  ctx.app.post("/api/intelligence/advice", async (req: any, res, next) => {
     try {
-      const info = intelligenceFor(ctx, req.actor, req.body.filters || {});
+      const info = await intelligenceFor(
+        ctx,
+        req.actor,
+        req.body.filters || {},
+      );
       const q = String(req.body.question || "")
         .slice(0, 10000)
         .toLowerCase();

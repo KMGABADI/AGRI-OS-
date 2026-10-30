@@ -1,0 +1,35 @@
+# Apply AFTER the DigitalOcean schema and data migration have verified successfully.
+# Supply the real values securely in Render; this file contains no credentials.
+services:
+  - type: web
+    name: rifan-connect
+    runtime: node
+    plan: starter
+    rootDir: rifan-app
+    numInstances: 1
+    buildCommand: npm ci --include=dev --no-audit --no-fund && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: "24"
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_PROVIDER
+        value: postgres
+      - key: DATABASE_URL
+        sync: false
+      - key: DATABASE_CA_CERT
+        sync: false
+      - key: DATABASE_AUTO_MIGRATE
+        value: "false"
+      - key: DATABASE_POOL_MAX
+        value: "10"
+      - key: COOKIE_SECURE
+        value: "true"
+      - key: ENABLE_DEMO
+        value: "false"
+      - key: BOOTSTRAP_ADMIN_EMAIL
+        value: admin@rifan.local
+      - key: BOOTSTRAP_ADMIN_PASSWORD
+        sync: false

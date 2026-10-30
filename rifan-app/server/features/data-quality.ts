@@ -16,14 +16,14 @@ export function requireReviewer(actor: Session) {
       "Data-quality checks across original imports require an administrator or unrestricted reviewer",
     );
 }
-export function reconcileImport(s: Store, space: string, id: string) {
-  const record = s.get(space, "imports", id);
+export async function reconcileImport(s: Store, space: string, id: string) {
+  const record = await s.get(space, "imports", id);
   if (!record) return;
-  const counts = s.db
+  const counts = (await s.db
     .prepare(
       "SELECT status,count(*) AS count FROM source_records WHERE space=? AND batch_id=? GROUP BY status",
     )
-    .all(space, id) as any[];
+    .all(space, id)) as any[];
   if (!counts.length) return; // A rejected/damaged file has no rows; retain its failure status.
   const summary = Object.fromEntries(counts.map((c) => [c.status, c.count]));
   const status = summary.Valid
@@ -33,7 +33,7 @@ export function reconcileImport(s: Store, space: string, id: string) {
       : "Completed";
   const next = { ...record, count: summary.Imported || 0, status, summary };
   if (JSON.stringify(next) !== JSON.stringify(record))
-    s.put(space, "imports", next);
+    await s.put(space, "imports", next);
   return next;
 }
 export function sourceCandidate(source: any) {
@@ -55,30 +55,38 @@ export function sourceCandidate(source: any) {
 function issue(error: unknown) {
   return error instanceof Error ? error.message : "Record needs review";
 }
-function linked(s: Store, space: string, row: Row) {
+async function linked(s: Store, space: string, row: Row) {
   for (const [key, entity] of [
     ["organizationId", "organizations"],
     ["programId", "programs"],
   ] as [string, Entity][]) {
-    if (row[key] && !s.get(space, entity, row[key]))
+    if (row[key] && !(await s.get(space, entity, row[key])))
       throw new Error(`${key} points to a missing record`);
   }
   if (row.programId && row.organizationId) {
-    const p = s.get(space, "programs", row.programId);
+    const p = await s.get(space, "programs", row.programId);
     if (p?.organizationId && p.organizationId !== row.organizationId)
       throw new Error("Programme must belong to the selected organization");
   }
   if (row.farmBoundary) validateBoundary(row.farmBoundary);
 }
-export function recheckSources(
+export async function recheckSources(
   s: Store,
   actor: Session,
-  options: { afterId?: number; batchId?: string; limit?: number },
-  duplicate: (space: string, row: Row, except?: string) => Row | undefined,
+  options: {
+    afterId?: number;
+    batchId?: string;
+    limit?: number;
+  },
+  duplicate: (
+    space: string,
+    row: Row,
+    except?: string,
+  ) => Promise<Row | undefined>,
 ) {
   const afterId = options.afterId || 0,
     limit = Math.min(500, Math.max(1, options.limit || 500));
-  const entries = s.db
+  const entries = (await s.db
     .prepare(
       `SELECT * FROM source_records WHERE space=? AND status='Invalid' AND id>? ${options.batchId ? "AND batch_id=?" : ""} ORDER BY id LIMIT ?`,
     )
@@ -87,7 +95,7 @@ export function recheckSources(
       afterId,
       ...(options.batchId ? [options.batchId] : []),
       limit,
-    ) as any[];
+    )) as any[];
   const result = {
     checked: 0,
     ready: 0,
@@ -98,7 +106,7 @@ export function recheckSources(
     remaining: 0,
   };
   const batches = new Set<string>();
-  s.transaction(() => {
+  await s.transaction(async () => {
     for (const source of entries) {
       let candidate: Row | undefined,
         reason = "",
@@ -109,8 +117,8 @@ export function recheckSources(
           ...sourceCandidate(source),
           id: randomUUID(),
         });
-        linked(s, actor.space, candidate);
-        const match = duplicate(actor.space, candidate);
+        await linked(s, actor.space, candidate);
+        const match = await duplicate(actor.space, candidate);
         if (match) {
           status = "Duplicate";
           reason = "Existing member matches phone, BVN, NIN or member ID";
@@ -123,7 +131,7 @@ export function recheckSources(
       const serialized = candidate
         ? JSON.stringify(candidate)
         : source.normalized;
-      s.db
+      await s.db
         .prepare(
           "UPDATE source_records SET normalized=?,status=?,reason=?,farmer_id=? WHERE id=? AND space=?",
         )
@@ -137,9 +145,9 @@ export function recheckSources(
       result.afterId = source.id;
       batches.add(source.batch_id);
     }
-    for (const batch of batches) reconcileImport(s, actor.space, batch);
+    for (const batch of batches) await reconcileImport(s, actor.space, batch);
     if (entries.length)
-      s.audit(
+      await s.audit(
         actor,
         "DATA_RECHECK",
         "imports",
@@ -148,7 +156,7 @@ export function recheckSources(
       );
   });
   result.remaining = (
-    s.db
+    (await s.db
       .prepare(
         `SELECT count(*) AS n FROM source_records WHERE space=? AND status='Invalid' AND id>? ${options.batchId ? "AND batch_id=?" : ""}`,
       )
@@ -156,32 +164,32 @@ export function recheckSources(
         actor.space,
         result.afterId,
         ...(options.batchId ? [options.batchId] : []),
-      ) as any
+      )) as any
   ).n;
   return result;
 }
-export function dataQualitySummary(s: Pick<Store, "db">, space: string) {
-  const statuses = s.db
+export async function dataQualitySummary(s: Pick<Store, "db">, space: string) {
+  const statuses = (await s.db
     .prepare(
       "SELECT status,count(*) AS count FROM source_records WHERE space=? GROUP BY status",
     )
-    .all(space) as any[];
-  const reasons = s.db
+    .all(space)) as any[];
+  const reasons = await s.db
     .prepare(
       "SELECT reason,count(*) AS count FROM source_records WHERE space=? AND status='Invalid' GROUP BY reason ORDER BY count(*) DESC LIMIT 50",
     )
     .all(space);
-  const farmers = s.db
+  const farmers = (await s.db
     .prepare(
       "SELECT count(*) AS total,sum(CASE WHEN json_extract(data,'$.latitude') IS NULL OR json_extract(data,'$.longitude') IS NULL THEN 1 ELSE 0 END) AS missingCoordinates,sum(CASE WHEN coalesce(json_extract(data,'$.dob'),'')='' THEN 1 ELSE 0 END) AS missingBirthDate FROM records WHERE space=? AND entity='farmers'",
     )
-    .get(space) as any;
+    .get(space)) as any;
   const orphanedSources = (
-    s.db
+    (await s.db
       .prepare(
         "SELECT count(*) AS n FROM source_records s WHERE space=? AND status='Imported' AND NOT EXISTS(SELECT 1 FROM records r WHERE r.space=s.space AND r.entity='farmers' AND r.id=s.farmer_id)",
       )
-      .get(space) as any
+      .get(space)) as any
   ).n;
   const phoneExpression =
     "CASE WHEN length(json_extract(data,'$.primaryPhone'))=11 AND substr(json_extract(data,'$.primaryPhone'),1,2) IN ('07','08','09') THEN '+234'||substr(json_extract(data,'$.primaryPhone'),2) WHEN length(json_extract(data,'$.primaryPhone'))=13 AND substr(json_extract(data,'$.primaryPhone'),1,3)='234' THEN '+'||json_extract(data,'$.primaryPhone') ELSE json_extract(data,'$.primaryPhone') END";
@@ -192,11 +200,11 @@ export function dataQualitySummary(s: Pick<Store, "db">, space: string) {
         ? phoneExpression
         : `json_extract(data,'$.${key}')`;
     duplicates[key] = (
-      s.db
+      (await s.db
         .prepare(
           `SELECT count(*) AS n FROM (SELECT ${expr} AS value FROM records WHERE space=? AND entity='farmers' AND coalesce(${expr},'')<>'' GROUP BY ${expr} HAVING count(*)>1)`,
         )
-        .get(space) as any
+        .get(space)) as any
     ).n;
   }
   return {
@@ -212,20 +220,24 @@ export function dataQualitySummary(s: Pick<Store, "db">, space: string) {
 }
 export function registerDataQuality(
   ctx: FeatureContext & {
-    duplicate: (space: string, row: Row, except?: string) => Row | undefined;
-    refCheck: (actor: Session, entity: Entity, row: Row) => void;
+    duplicate: (
+      space: string,
+      row: Row,
+      except?: string,
+    ) => Promise<Row | undefined>;
+    refCheck: (actor: Session, entity: Entity, row: Row) => Promise<void>;
   },
 ) {
   ctx.app.get(
     "/api/data-quality",
-    route((req, res) => {
+    route(async (req, res) => {
       requireReviewer(req.actor);
-      res.json(dataQualitySummary(ctx.s, req.actor.space));
+      res.json(await dataQualitySummary(ctx.s, req.actor.space));
     }),
   );
   ctx.app.post(
     "/api/data-quality/recheck",
-    route((req, res) => {
+    route(async (req, res) => {
       requireReviewer(req.actor);
       const afterId = Number(req.body.afterId || 0);
       if (!Number.isSafeInteger(afterId) || afterId < 0)
@@ -236,7 +248,7 @@ export function registerDataQuality(
       )
         reject(400, "Invalid import ID");
       res.json(
-        recheckSources(
+        await recheckSources(
           ctx.s,
           req.actor,
           { afterId, batchId: req.body.batchId },
@@ -247,22 +259,22 @@ export function registerDataQuality(
   );
   ctx.app.post(
     "/api/data-quality/audit",
-    route((req, res) => {
+    route(async (req, res) => {
       requireReviewer(req.actor);
       const offset = Number(req.body.offset || 0);
       if (!Number.isSafeInteger(offset) || offset < 0)
         reject(400, "Invalid registry cursor");
-      const version = ctx.s.version();
+      const version = await ctx.s.version();
       if (req.body.version && req.body.version !== version)
         reject(
           409,
           "Farmer records changed during the audit. Restart it for consistent results.",
         );
-      const rows = ctx.s.db
+      const rows = (await ctx.s.db
         .prepare(
           "SELECT data FROM records WHERE space=? AND entity='farmers' ORDER BY rowid LIMIT 500 OFFSET ?",
         )
-        .all(req.actor.space, offset) as any[];
+        .all(req.actor.space, offset)) as any[];
       const result = {
         version,
         checked: rows.length,
@@ -277,7 +289,7 @@ export function registerDataQuality(
         const original = JSON.parse(item.data);
         try {
           const checked = validate("farmers", original);
-          linked(ctx.s, req.actor.space, checked);
+          await linked(ctx.s, req.actor.space, checked);
           result.valid++;
           if (JSON.stringify(original) !== JSON.stringify(checked))
             result.normalizable++;

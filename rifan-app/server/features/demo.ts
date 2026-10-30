@@ -1,6 +1,6 @@
 import type { Store } from "../database";
-export function seedOperationsDemo(s: Store) {
-  if (s.get("demo", "seasons", "demo-season-current")) return;
+export async function seedOperationsDemo(s: Store) {
+  if (await s.get("demo", "seasons", "demo-season-current")) return;
   const today = new Date(),
     year = today.getUTCFullYear();
   const day = (n: number) => {
@@ -8,7 +8,7 @@ export function seedOperationsDemo(s: Store) {
     d.setUTCDate(d.getUTCDate() + n);
     return d.toISOString().slice(0, 10);
   };
-  s.transaction(() => {
+  await s.transaction(async () => {
     for (let i = 0; i < 3; i++) {
       const y = year - 2 + i,
         id = i === 2 ? "demo-season-current" : "demo-season-" + y;
@@ -25,9 +25,9 @@ export function seedOperationsDemo(s: Store) {
         warehouseIds: ["wh-0"],
         status: i === 2 ? "Active" : "Completed",
       };
-      s.put("demo", "seasons", season);
+      await s.put("demo", "seasons", season);
       const campaignId = "demo-intervention-" + y;
-      s.put("demo", "interventions", {
+      await s.put("demo", "interventions", {
         id: campaignId,
         name: `DEMO ${y} RICE EXTENSION`,
         programId: "pr-wet",
@@ -46,7 +46,7 @@ export function seedOperationsDemo(s: Store) {
             ? ["Niger", "Bida", 9.08, 6.01]
             : ["Kebbi", "Birnin Kebbi", 12.45, 4.2];
       const locationId = "demo-site-" + y;
-      s.put("demo", "farmLocations", {
+      await s.put("demo", "farmLocations", {
         id: locationId,
         farmerId: "demo-farmer-1",
         programId: "pr-wet",
@@ -64,7 +64,7 @@ export function seedOperationsDemo(s: Store) {
         captureMethod: "Synthetic demonstration",
         notes: "Synthetic location; not a real farmer survey.",
       });
-      s.put("demo", "participations", {
+      await s.put("demo", "participations", {
         id: "demo-participation-" + y,
         farmerId: "demo-farmer-1",
         programId: "pr-wet",
@@ -78,7 +78,7 @@ export function seedOperationsDemo(s: Store) {
         enrolledAt: season.startDate,
         source: "Synthetic demonstration",
       });
-      s.put("demo", "harvestTasks", {
+      await s.put("demo", "harvestTasks", {
         id: "demo-harvest-" + y,
         name: `DEMO ${y} MEASURED RICE HARVEST`,
         farmerId: "demo-farmer-1",
@@ -96,7 +96,7 @@ export function seedOperationsDemo(s: Store) {
         expectedYield: 5000,
         notes: "Synthetic measured outcome for demonstration.",
       });
-      s.put("demo", "fieldValidations", {
+      await s.put("demo", "fieldValidations", {
         id: "demo-validation-" + y,
         farmerId: "demo-farmer-1",
         programId: "pr-wet",
@@ -114,7 +114,7 @@ export function seedOperationsDemo(s: Store) {
         notes: "Synthetic manager-approved evidence.",
       });
     }
-    s.put("demo", "harvestTasks", {
+    await s.put("demo", "harvestTasks", {
       id: "demo-upcoming-plan",
       name: "DEMO COHORT HARVEST READINESS",
       programId: "pr-wet",

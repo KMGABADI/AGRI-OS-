@@ -588,7 +588,15 @@ export function RecordForm({
                 else if (out[f.key] !== undefined)
                   out[f.key] = Number(out[f.key]);
               });
-            await onSave(out);
+            await onSave({
+              ...out,
+              ...(initial.id
+                ? {
+                    expectedUpdatedAt:
+                      initial.updatedAt || initial.createdAt || "",
+                  }
+                : {}),
+            });
             onClose();
           } catch (e: any) {
             setError(e.message);

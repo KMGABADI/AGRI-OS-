@@ -4,7 +4,6 @@ import path from "node:path";
 import { existsSync } from "node:fs";
 import { appRoot, runtimeConfig } from "./runtime";
 import { createApi } from "./api";
-
 async function start() {
   dotenv.config({ path: path.join(appRoot, ".env"), quiet: true });
   process.env.NODE_ENV ||= import.meta.url.endsWith("/dist/server.mjs")
@@ -18,12 +17,16 @@ async function start() {
       "Production assets are missing. Run npm run build before npm start (Render Root Directory: rifan-app).",
     );
   }
-  if (process.env.RENDER === "true" && !process.env.RIFAN_DB_PATH) {
+  if (
+    process.env.RENDER === "true" &&
+    !process.env.DATABASE_URL &&
+    !process.env.RIFAN_DB_PATH
+  ) {
     console.warn(
       "Render storage is ephemeral. Attach a persistent disk and set RIFAN_DB_PATH=/var/data/rifan.sqlite before importing real data.",
     );
   }
-  const { app, store } = createApi({ filename: config.database });
+  const { app, store } = await createApi({ filename: config.database });
   if (production) {
     app.use(
       "/assets",
@@ -54,12 +57,12 @@ async function start() {
   }
   const server = app.listen(config.port, config.host, () => {
     console.log(
-      `RIFAN Connect running on port ${config.port}; independent SQLite storage enabled.`,
+      `RIFAN Connect running on port ${config.port}; ${store.db.kind} storage enabled.`,
     );
   });
-  server.on("error", (error) => {
+  server.on("error", async (error) => {
     console.error(`RIFAN Connect could not listen: ${error.message}`);
-    store.db.close();
+    await store.db.close();
     process.exitCode = 1;
   });
   let closing = false;
@@ -69,8 +72,8 @@ async function start() {
       closing = true;
       const timeout = setTimeout(() => process.exit(1), 10000);
       timeout.unref();
-      server.close(() => {
-        store.db.close();
+      server.close(async () => {
+        await store.db.close();
         clearTimeout(timeout);
       });
       server.closeIdleConnections();

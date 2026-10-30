@@ -8,31 +8,37 @@ export interface PaymentGateway {
   initialize: (payload: any) => Promise<any>;
   verify: (reference: string) => Promise<any>;
 }
-export function paymentState(s: Store, space: string, farmerId: string) {
-  const f = s.get(space, "farmers", farmerId);
-  if (!f) return;
-  const settings = s.settings(space);
-  const rows = s
-    .all(space, "payments")
-    .filter((p) => p.farmerId === farmerId && p.status === "Verified");
-  const registration = rows
-    .filter((p) => p.type === "Registration")
-    .reduce((a, p) => a + Number(p.amount), 0);
-  const membership = rows
-    .filter(
-      (p) =>
-        p.type === "Membership" &&
-        p.period === String(new Date().getFullYear()),
-    )
-    .reduce((a, p) => a + Number(p.amount), 0);
-  const paid =
-    rows.length > 0 &&
-    registration >= Number(settings.registrationFee) &&
-    membership >= Number(settings.membershipFee);
-  s.put(space, "farmers", {
-    ...f,
-    paymentStatus: paid ? "Paid" : rows.length ? "Part paid" : "Unpaid",
-    membershipStatus: paid && f.kycComplete ? "Active" : "Awaiting review",
+export async function paymentState(s: Store, space: string, farmerId: string) {
+  await s.locked(`record:${space}:farmers:${farmerId}`, async () => {
+    const f = await s.get(space, "farmers", farmerId);
+    if (!f) return;
+    const settings = await s.settings(space);
+    const rows = (
+      await s.db
+        .prepare(
+          "SELECT data FROM records WHERE space=? AND entity='payments' AND json_extract(data,'$.farmerId')=? AND json_extract(data,'$.status')='Verified'",
+        )
+        .all(space, farmerId)
+    ).map((item) => JSON.parse(item.data));
+    const registration = rows
+      .filter((p) => p.type === "Registration")
+      .reduce((a, p) => a + Number(p.amount), 0);
+    const membership = rows
+      .filter(
+        (p) =>
+          p.type === "Membership" &&
+          p.period === String(new Date().getFullYear()),
+      )
+      .reduce((a, p) => a + Number(p.amount), 0);
+    const paid =
+      rows.length > 0 &&
+      registration >= Number(settings.registrationFee) &&
+      membership >= Number(settings.membershipFee);
+    await s.put(space, "farmers", {
+      ...f,
+      paymentStatus: paid ? "Paid" : rows.length ? "Part paid" : "Unpaid",
+      membershipStatus: paid && f.kycComplete ? "Active" : "Awaiting review",
+    });
   });
 }
 export function createPaystack(
@@ -58,20 +64,21 @@ export function createPaystack(
     return result.data;
   };
   const gateway = adapter || {
-    initialize: (payload: any) => request("/transaction/initialize", payload),
-    verify: (reference: string) =>
-      request("/transaction/verify/" + encodeURIComponent(reference)),
+    initialize: async (payload: any) =>
+      await request("/transaction/initialize", payload),
+    verify: async (reference: string) =>
+      await request("/transaction/verify/" + encodeURIComponent(reference)),
   };
-  const find = (reference: string) => {
-    const r = s.db
+  const find = async (reference: string) => {
+    const r = (await s.db
       .prepare(
         "SELECT space,data FROM records WHERE entity='payments' AND json_extract(data,'$.provider')='Paystack' AND json_extract(data,'$.reference')=? LIMIT 1",
       )
-      .get(reference) as any;
+      .get(reference)) as any;
     return r ? { space: r.space, row: JSON.parse(r.data) as Row } : null;
   };
   const verify = async (reference: string) => {
-    const found = find(reference);
+    const found = await find(reference);
     if (!found) reject(404, "Payment reference is unavailable");
     if (found.row.status === "Verified")
       return { status: "Verified", duplicate: true };
@@ -87,10 +94,10 @@ export function createPaystack(
         409,
         "Paystack amount/currency does not match the membership obligation",
       );
-    s.transaction(() => {
-      const latest = s.get(found.space, "payments", found.row.id)!;
+    await s.locked("paystack:" + reference, async () => {
+      const latest = (await s.get(found.space, "payments", found.row.id))!;
       if (latest.status === "Verified") return;
-      s.put(found.space, "payments", {
+      await s.put(found.space, "payments", {
         ...latest,
         status: "Verified",
         verifiedAt: new Date().toISOString(),
@@ -98,8 +105,8 @@ export function createPaystack(
         providerTransactionId: String(data.id),
         paidAt: data.paid_at || new Date().toISOString(),
       });
-      paymentState(s, found.space, latest.farmerId);
-      s.audit(
+      await paymentState(s, found.space, latest.farmerId);
+      await s.audit(
         {
           id: "paystack",
           name: "Paystack verification",
@@ -141,7 +148,7 @@ export function createPaystack(
             }
             if (
               event.event !== "charge.success" ||
-              !find(event.data?.reference)
+              !(await find(event.data?.reference))
             ) {
               res.json({ received: true, ignored: true });
               return;
@@ -169,8 +176,8 @@ export function createPaystack(
           if (!secret())
             reject(503, "Configure Paystack securely before starting checkout");
           const { farmerId, type, email } = req.body;
-          const f = s.get(req.actor.space, "farmers", farmerId);
-          if (!f || !ctx.allowed(req.actor, "farmers", f))
+          const f = await s.get(req.actor.space, "farmers", farmerId);
+          if (!f || !(await ctx.allowed(req.actor, "farmers", f)))
             reject(404, "Member not found");
           if (
             !["Registration", "Membership"].includes(type) ||
@@ -178,7 +185,7 @@ export function createPaystack(
             !/^\S+@\S+\.\S+$/.test(email)
           )
             reject(400, "Provide a fee type and payer email");
-          const settings = s.settings(req.actor.space),
+          const settings = await s.settings(req.actor.space),
             amount = Number(
               type === "Registration"
                 ? settings.registrationFee
@@ -203,7 +210,7 @@ export function createPaystack(
             date: new Date().toISOString(),
             recordedBy: req.actor.id,
           };
-          s.put(req.actor.space, "payments", row);
+          await s.put(req.actor.space, "payments", row);
           try {
             const base =
               process.env.PUBLIC_URL || process.env.RENDER_EXTERNAL_URL;
@@ -228,7 +235,7 @@ export function createPaystack(
               (!adapter && url.hostname !== "checkout.paystack.com")
             )
               reject(502, "Provider returned an invalid checkout URL");
-            s.audit(
+            await s.audit(
               req.actor,
               "CHECKOUT_CREATED",
               "payments",
@@ -237,7 +244,7 @@ export function createPaystack(
             );
             res.status(201).json({ reference, url: url.href });
           } catch (e) {
-            s.put(req.actor.space, "payments", {
+            await s.put(req.actor.space, "payments", {
               ...row,
               status: "Checkout failed",
             });
@@ -248,11 +255,11 @@ export function createPaystack(
       ctx.app.post(
         "/api/payments/paystack/:reference/verify",
         route(async (req, res) => {
-          const found = find(req.params.reference);
+          const found = await find(req.params.reference);
           if (!found || found.space !== req.actor.space)
             reject(404, "Payment not found");
-          const f = s.get(req.actor.space, "farmers", found.row.farmerId);
-          if (!f || !ctx.allowed(req.actor, "farmers", f))
+          const f = await s.get(req.actor.space, "farmers", found.row.farmerId);
+          if (!f || !(await ctx.allowed(req.actor, "farmers", f)))
             reject(403, "Payment outside your access scope");
           res.json(await verify(req.params.reference));
         }),

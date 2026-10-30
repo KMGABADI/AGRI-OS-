@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { randomBytes, randomUUID, createHash } from "node:crypto";
 import { createApi } from "../server/api";
-const { app, store } = createApi({
+const { app, store } = await createApi({
   filename: ".data/rifan.sqlite",
   demo: false,
 });
@@ -18,7 +18,7 @@ const actor = {
   space: "workspace",
   demo: false,
 };
-store.db
+await store.db
   .prepare(
     "INSERT INTO users(id,space,email,name,role,hash,salt) VALUES(?,?,?,?,?,?,?)",
   )
@@ -31,7 +31,7 @@ store.db
     randomBytes(64).toString("hex"),
     randomBytes(16).toString("hex"),
   );
-store.db
+await store.db
   .prepare(
     "INSERT INTO sessions(token,user_id,space,expires,data) VALUES(?,?,?,?,?)",
   )
@@ -58,11 +58,11 @@ try {
   const started = performance.now();
   const snap = await call("/api/snapshot");
   const elapsed = Math.round(performance.now() - started);
-  const counts = store.db
+  const counts = (await store.db
     .prepare(
       "SELECT status,count(*) AS count FROM source_records WHERE space='workspace' GROUP BY status",
     )
-    .all() as any[];
+    .all()) as any[];
   const total = counts.reduce((a, r) => a + r.count, 0);
   assert.equal(total, 186353);
   assert.equal(snap.summary.totalFarmers, 172743);
@@ -87,11 +87,11 @@ try {
       (f: any) => !("bvn" in f) && !("nin" in f) && !("accountNumber" in f),
     ),
   );
-  const privateFields = store.db
+  const privateFields = (await store.db
     .prepare(
       "SELECT count(*) AS n FROM records WHERE space='workspace' AND entity='farmers' AND json_extract(data,'$.kycComplete')=1",
     )
-    .get() as any;
+    .get()) as any;
   assert.equal(privateFields.n, 0);
   console.log(
     JSON.stringify({
@@ -115,8 +115,8 @@ try {
     }),
   );
 } finally {
-  store.db.prepare("DELETE FROM sessions WHERE user_id=?").run(id);
-  store.db.prepare("DELETE FROM users WHERE id=?").run(id);
+  await store.db.prepare("DELETE FROM sessions WHERE user_id=?").run(id);
+  await store.db.prepare("DELETE FROM users WHERE id=?").run(id);
   await new Promise<void>((r) => server.close(() => r()));
-  store.db.close();
+  await store.db.close();
 }

@@ -15,7 +15,9 @@ export type MailMessage = {
   text: string;
   html: string;
 };
-export type Mailer = { send: (message: MailMessage) => Promise<void> };
+export type Mailer = {
+  send: (message: MailMessage) => Promise<void>;
+};
 const escape = (v: string) =>
   v.replace(
     /[&<>"']/g,
@@ -70,11 +72,11 @@ export function createSecurity(s: Store, mailer?: Mailer) {
     typeof value === "string" &&
     value.length <= 1000 &&
     timingSafeEqual(Buffer.from(u.hash, "hex"), scryptSync(value, u.salt, 64));
-  const needs = (u: any) =>
+  const needs = async (u: any) =>
     !!(
       u.twofa_enabled ||
       u.twofa_required ||
-      s.settings(u.space).requireTwoFactor
+      (await s.settings(u.space)).requireTwoFactor
     );
   const send = async (u: any, purpose: string) => {
     if (!configured())
@@ -82,11 +84,11 @@ export function createSecurity(s: Store, mailer?: Mailer) {
         503,
         "Branded email OTP requires a configured email provider. Contact your administrator.",
       );
-    const last = s.db
+    const last = (await s.db
       .prepare(
         "SELECT created FROM otp_challenges WHERE user_id=? AND purpose=? ORDER BY created DESC LIMIT 1",
       )
-      .get(u.id, purpose) as any;
+      .get(u.id, purpose)) as any;
     if (last && Date.now() - last.created < 60000)
       reject(
         429,
@@ -95,7 +97,7 @@ export function createSecurity(s: Store, mailer?: Mailer) {
     const id = randomUUID(),
       code = String(randomInt(0, 1000000)).padStart(6, "0"),
       salt = randomBytes(16).toString("hex");
-    s.db
+    await s.db
       .prepare(
         "INSERT INTO otp_challenges(id,user_id,space,purpose,hash,salt,expires,created) VALUES(?,?,?,?,?,?,?,?)",
       )
@@ -109,7 +111,7 @@ export function createSecurity(s: Store, mailer?: Mailer) {
         Date.now() + 5 * 60000,
         Date.now(),
       );
-    const branding = s.settings(u.space);
+    const branding = await s.settings(u.space);
     const logoBase = process.env.PUBLIC_URL || process.env.RENDER_EXTERNAL_URL;
     const logo = logoBase
       ? `<img width="64" alt="RIFAN" src="${escape(logoBase.replace(/\/$/, "") + "/rifan-logo.png")}"/>`
@@ -124,7 +126,7 @@ export function createSecurity(s: Store, mailer?: Mailer) {
       if (mailer) await mailer.send(message);
       else await deliver(message);
     } catch {
-      s.db.prepare("DELETE FROM otp_challenges WHERE id=?").run(id);
+      await s.db.prepare("DELETE FROM otp_challenges WHERE id=?").run(id);
       reject(
         503,
         "OTP email could not be sent. No security setting was changed.",
@@ -137,29 +139,30 @@ export function createSecurity(s: Store, mailer?: Mailer) {
       message: "A verification code was sent to your account email.",
     };
   };
-  const consume = (id: any, code: any, purpose: string, userId?: string) => {
+  const consume = async (
+    id: any,
+    code: any,
+    purpose: string,
+    userId?: string,
+  ) => {
     if (
       typeof id !== "string" ||
       typeof code !== "string" ||
       !/^\d{6}$/.test(code)
     )
       reject(400, "Enter the six-digit verification code");
-    const challenge = s.db
-      .prepare("SELECT * FROM otp_challenges WHERE id=? AND purpose=?")
-      .get(id, purpose) as any;
-    if (
-      !challenge ||
-      challenge.expires < Date.now() ||
-      challenge.attempts >= 5 ||
-      (userId && challenge.user_id !== userId)
-    )
+    const challenge = await s.db
+      .prepare(
+        "UPDATE otp_challenges SET attempts=attempts+1 WHERE id=? AND purpose=? AND expires>=? AND attempts<5" +
+          (userId ? " AND user_id=?" : "") +
+          " RETURNING *",
+      )
+      .get(id, purpose, Date.now(), ...(userId ? [userId] : []));
+    if (!challenge)
       reject(
         401,
         "OTP is expired, unavailable or exhausted. Sign in/request a new code.",
       );
-    s.db
-      .prepare("UPDATE otp_challenges SET attempts=attempts+1 WHERE id=?")
-      .run(id);
     if (
       !timingSafeEqual(
         Buffer.from(challenge.hash, "hex"),
@@ -167,10 +170,14 @@ export function createSecurity(s: Store, mailer?: Mailer) {
       )
     )
       reject(401, "Verification code is incorrect");
-    s.db.prepare("DELETE FROM otp_challenges WHERE id=?").run(id);
-    const u = s.db
+    const consumed = await s.db
+      .prepare("DELETE FROM otp_challenges WHERE id=? RETURNING id")
+      .get(id);
+    if (!consumed)
+      reject(401, "OTP was already used. Sign in/request a new code.");
+    const u = (await s.db
       .prepare("SELECT * FROM users WHERE id=? AND space=?")
-      .get(challenge.user_id, challenge.space) as any;
+      .get(challenge.user_id, challenge.space)) as any;
     if (!u) reject(401, "Account is unavailable");
     return u;
   };
@@ -181,14 +188,14 @@ export function createSecurity(s: Store, mailer?: Mailer) {
     send,
     mountPublic(
       app: Express,
-      issue: (res: Response, actor: Session) => Session,
+      issue: (res: Response, actor: Session) => Promise<Session>,
     ) {
       app.post(
         "/api/auth/otp/verify",
-        route((req, res) => {
-          const u = consume(req.body.challengeId, req.body.code, "login");
+        route(async (req, res) => {
+          const u = await consume(req.body.challengeId, req.body.code, "login");
           const scope = JSON.parse(u.scope || "{}");
-          s.audit(
+          await s.audit(
             { id: u.id, name: u.name, space: u.space } as Session,
             "2FA_LOGIN",
             "users",
@@ -196,11 +203,12 @@ export function createSecurity(s: Store, mailer?: Mailer) {
             "Email OTP verified",
           );
           res.json(
-            issue(res, {
+            await issue(res, {
               id: u.id,
               name: u.name,
               email: u.email,
               role: u.role,
+              mustChangePassword: !!u.must_change_password,
               space: u.space,
               demo: false,
               ...scope,
@@ -212,17 +220,17 @@ export function createSecurity(s: Store, mailer?: Mailer) {
     mountPrivate(app: Express) {
       app.get(
         "/api/security/2fa",
-        route((req, res) => {
-          const u = s.db
+        route(async (req, res) => {
+          const u = (await s.db
             .prepare(
               "SELECT twofa_enabled,twofa_required FROM users WHERE id=? AND space=?",
             )
-            .get(req.actor.id, req.actor.space) as any;
+            .get(req.actor.id, req.actor.space)) as any;
           res.json({
             enabled: !!u?.twofa_enabled,
             required:
               !!u?.twofa_required ||
-              !!s.settings(req.actor.space).requireTwoFactor,
+              !!(await s.settings(req.actor.space)).requireTwoFactor,
             emailConfigured: configured(),
             demo: req.actor.demo,
           });
@@ -233,16 +241,17 @@ export function createSecurity(s: Store, mailer?: Mailer) {
         route(async (req, res) => {
           if (req.actor.demo)
             reject(400, "Security changes require a private workspace account");
-          const u = s.db
+          const u = (await s.db
             .prepare("SELECT * FROM users WHERE id=? AND space=?")
-            .get(req.actor.id, req.actor.space) as any;
+            .get(req.actor.id, req.actor.space)) as any;
           if (!u || !password(u, req.body.currentPassword))
             reject(403, "Current password is incorrect");
           if (typeof req.body.enabled !== "boolean")
             reject(400, "Choose whether to enable 2FA");
           if (
             !req.body.enabled &&
-            (u.twofa_required || s.settings(req.actor.space).requireTwoFactor)
+            (u.twofa_required ||
+              (await s.settings(req.actor.space)).requireTwoFactor)
           )
             reject(403, "An administrator requires two-factor authentication");
           res.json(await send(u, req.body.enabled ? "enable" : "disable"));
@@ -250,11 +259,11 @@ export function createSecurity(s: Store, mailer?: Mailer) {
       );
       app.post(
         "/api/security/2fa/confirm",
-        route((req, res) => {
+        route(async (req, res) => {
           const purpose = req.body.enabled === true ? "enable" : "disable";
           if (typeof req.body.enabled !== "boolean")
             reject(400, "Choose whether to enable 2FA");
-          const u = consume(
+          const u = await consume(
             req.body.challengeId,
             req.body.code,
             purpose,
@@ -262,15 +271,18 @@ export function createSecurity(s: Store, mailer?: Mailer) {
           );
           if (
             purpose === "disable" &&
-            (u.twofa_required || s.settings(req.actor.space).requireTwoFactor)
+            (u.twofa_required ||
+              (await s.settings(req.actor.space)).requireTwoFactor)
           )
             reject(403, "An administrator requires two-factor authentication");
-          s.transaction(() => {
-            s.db
+          await s.transaction(async () => {
+            await s.db
               .prepare("UPDATE users SET twofa_enabled=? WHERE id=?")
               .run(purpose === "enable" ? 1 : 0, u.id);
-            s.db.prepare("DELETE FROM sessions WHERE user_id=?").run(u.id);
-            s.audit(
+            await s.db
+              .prepare("DELETE FROM sessions WHERE user_id=?")
+              .run(u.id);
+            await s.audit(
               req.actor,
               "2FA_CHANGE",
               "users",
@@ -285,15 +297,15 @@ export function createSecurity(s: Store, mailer?: Mailer) {
       );
       app.put(
         "/api/security/users/:id/2fa",
-        route((req, res) => {
+        route(async (req, res) => {
           if (!admin(req.actor) || req.actor.demo)
             reject(403, "Administrator access required");
-          const actor = s.db
+          const actor = (await s.db
             .prepare("SELECT * FROM users WHERE id=?")
-            .get(req.actor.id) as any;
-          const target = s.db
+            .get(req.actor.id)) as any;
+          const target = (await s.db
             .prepare("SELECT * FROM users WHERE id=? AND space=?")
-            .get(req.params.id, req.actor.space) as any;
+            .get(req.params.id, req.actor.space)) as any;
           if (!target) reject(404, "User not found");
           if (
             req.actor.role === "Admin" &&
@@ -313,8 +325,8 @@ export function createSecurity(s: Store, mailer?: Mailer) {
               503,
               "Configure email delivery before enabling required 2FA",
             );
-          s.transaction(() => {
-            s.db
+          await s.transaction(async () => {
+            await s.db
               .prepare(
                 "UPDATE users SET twofa_enabled=?,twofa_required=? WHERE id=?",
               )
@@ -323,11 +335,13 @@ export function createSecurity(s: Store, mailer?: Mailer) {
                 req.body.required ? 1 : 0,
                 target.id,
               );
-            s.db.prepare("DELETE FROM sessions WHERE user_id=?").run(target.id);
-            s.db
+            await s.db
+              .prepare("DELETE FROM sessions WHERE user_id=?")
+              .run(target.id);
+            await s.db
               .prepare("DELETE FROM otp_challenges WHERE user_id=?")
               .run(target.id);
-            s.audit(
+            await s.audit(
               req.actor,
               "2FA_ADMIN",
               "users",

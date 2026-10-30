@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback, lazy, Suspense } from "react";
 import {
-  BrowserRouter, Navigate,
+  BrowserRouter,
+  Navigate,
   Routes,
   Route,
   NavLink,
@@ -44,8 +45,8 @@ import { canEdit } from "./model";
 import Auth from "./pages/Auth";
 import { Modal } from "./components/ui";
 const CardPrint = lazy(() => import("./pages/CardPrint"));
-const Operations=lazy(()=>import('./pages/Operations'));
-const RecordDetail=lazy(()=>import('./pages/RecordDetail'));
+const Operations = lazy(() => import("./pages/Operations"));
+const RecordDetail = lazy(() => import("./pages/RecordDetail"));
 const Dashboard = lazy(() => import("./pages/Dashboard"));
 const Farmers = lazy(() => import("./pages/Farmers"));
 const FarmerProfile = lazy(() => import("./pages/FarmerProfile"));
@@ -89,8 +90,12 @@ const groups = [
         feature: "enableMonitoring",
       },
       { name: "Interventions", path: "/interventions", icon: Sprout },
-      {name:"Seasons",path:"/seasons",icon:CalendarDays},
-      {name:"Field validation",path:"/field-validation",icon:ShieldCheck},
+      { name: "Seasons", path: "/seasons", icon: CalendarDays },
+      {
+        name: "Field validation",
+        path: "/field-validation",
+        icon: ShieldCheck,
+      },
       { name: "Farm advisor", path: "/advisor", icon: Bot },
     ],
   },
@@ -135,6 +140,7 @@ const groups = [
     ],
   },
 ];
+import InitialPassword from "./pages/InitialPassword";
 export default function App() {
   const [session, setSession] = useState<Session | null>(null),
     [loading, setLoading] = useState(true);
@@ -153,6 +159,8 @@ export default function App() {
       </div>
     );
   if (!session) return <Auth onLogin={setSession} />;
+  if (session.mustChangePassword)
+    return <InitialPassword session={session} onLogout={clear} />;
   return (
     <BrowserRouter>
       <WorkspaceProvider session={session} onLogout={clear}>
@@ -171,11 +179,20 @@ export default function App() {
           />
           <Route element={<Shell />}>
             <Route index element={<Dashboard />} />
-            <Route path="records/:entity/:id" element={<RecordDetail/>}/>
-            <Route path="interventions" element={<Operations entity="interventions"/>}/>
-            <Route path="seasons" element={<Operations entity="seasons"/>}/>
-            <Route path="field-validation" element={<Operations entity="fieldValidations"/>}/>
-            <Route path="farm-locations" element={<Operations entity="farmLocations"/>}/>
+            <Route path="records/:entity/:id" element={<RecordDetail />} />
+            <Route
+              path="interventions"
+              element={<Operations entity="interventions" />}
+            />
+            <Route path="seasons" element={<Operations entity="seasons" />} />
+            <Route
+              path="field-validation"
+              element={<Operations entity="fieldValidations" />}
+            />
+            <Route
+              path="farm-locations"
+              element={<Operations entity="farmLocations" />}
+            />
             <Route path="farmers" element={<Farmers />} />
             <Route path="farmers/:id" element={<FarmerProfile />} />
             <Route path="membership" element={<Membership />} />
@@ -195,7 +212,10 @@ export default function App() {
             <Route path="map" element={<MapPage />} />
             <Route path="calendar" element={<Calendar />} />
             <Route path="upload" element={<DataHub />} />
-            <Route path="reports" element={<Navigate to="/?view=reports" replace />} />
+            <Route
+              path="reports"
+              element={<Navigate to="/?view=reports" replace />}
+            />
             <Route path="connections" element={<Connections />} />
             <Route path="food-bank" element={<FoodBank />} />
             <Route path="advisor" element={<Advisor />} />

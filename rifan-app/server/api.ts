@@ -1,3 +1,5 @@
+import { asyncFilter, asyncMap } from "./db/async-collections";
+import { ensureBootstrapAdmin } from "./bootstrap";
 import express, {
   type Request,
   type Response,
@@ -50,8 +52,9 @@ import {
   type GoogleOAuthFactory,
   GMAIL_SCOPE,
 } from "./features/google";
-
-type R = Request & { actor: Session };
+type R = Request & {
+  actor: Session;
+};
 function fail(status: number, message: string): never {
   throw Object.assign(new Error(message), { status });
 }
@@ -63,6 +66,7 @@ const publicUser = (u: any) => ({
   email: u.email,
   role: u.role,
   ...JSON.parse(u.scope || "{}"),
+  mustChangePassword: !!u.must_change_password,
   twoFactorEnabled: !!u.twofa_enabled,
   twoFactorRequired: !!u.twofa_required,
 });
@@ -74,11 +78,12 @@ const safe =
       .catch(next);
   };
 const tokenHash = (s: string) => createHash("sha256").update(s).digest("hex");
-export function createApi(
+export async function createApi(
   options: {
     filename?: string;
     mailer?: Mailer;
     googleOAuthFactory?: GoogleOAuthFactory;
+    bootstrap?: boolean;
     paystack?: PaymentGateway;
     paystackSecret?: string;
     demo?: boolean;
@@ -103,16 +108,20 @@ export function createApi(
       throw new Error("PUBLIC_URL must be a valid HTTP(S) application URL.");
     }
   }
-  const s = openDatabase(
-    options.filename || process.env.RIFAN_DB_PATH || ".data/rifan.sqlite",
+  const s = await openDatabase(
+    options.filename ||
+      process.env.DATABASE_URL ||
+      process.env.RIFAN_DB_PATH ||
+      ".data/rifan.sqlite",
   );
+  if (options.bootstrap !== false) await ensureBootstrapAdmin(s);
   const demoEnabled =
     options.demo ??
     (process.env.NODE_ENV !== "production" ||
       process.env.ENABLE_DEMO === "true");
   if (demoEnabled) {
-    seedDemo(s);
-    seedOperationsDemo(s);
+    await seedDemo(s);
+    await seedOperationsDemo(s);
   }
   const app = express();
   app.disable("x-powered-by");
@@ -153,23 +162,27 @@ export function createApi(
     }
     next();
   });
-  const attempts = new Map<string, { count: number; until: number }>();
   const rateLimit = (req: Request, res: Response, next: NextFunction) => {
-    const key = req.ip || req.socket.remoteAddress || "local";
-    let a = attempts.get(key);
-    if (!a || a.until < Date.now()) {
-      a = { count: 0, until: Date.now() + 60000 };
-      attempts.set(key, a);
-    }
-    if (++a.count > 20)
-      return res
-        .status(429)
-        .json({ error: "Too many sign-in attempts. Try again in a minute." });
-    next();
+    (async () => {
+      const key = tokenHash(req.ip || req.socket.remoteAddress || "local"),
+        now = Date.now();
+      const row = await s.db
+        .prepare(
+          "INSERT INTO auth_attempts(key,attempts,until) VALUES(?,1,?) ON CONFLICT(key) DO UPDATE SET attempts=CASE WHEN auth_attempts.until<? THEN 1 ELSE auth_attempts.attempts+1 END,until=CASE WHEN auth_attempts.until<? THEN ? ELSE auth_attempts.until END RETURNING attempts",
+        )
+        .get(key, now + 60000, now, now, now + 60000);
+      if (row.attempts > 20) {
+        res
+          .status(429)
+          .json({ error: "Too many sign-in attempts. Try again in a minute." });
+        return;
+      }
+      next();
+    })().catch(next);
   };
-  const issue = (res: Response, actor: Session) => {
+  const issue = async (res: Response, actor: Session) => {
     const token = randomBytes(32).toString("hex");
-    s.db
+    await s.db
       .prepare(
         "INSERT INTO sessions(token,user_id,space,expires,data) VALUES(?,?,?,?,?)",
       )
@@ -192,16 +205,20 @@ export function createApi(
     });
     return actor;
   };
-  const authenticate = (req: Request, res: Response, next: NextFunction) => {
+  const authenticateAction = async (
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ) => {
     const token = (req.headers.cookie || "")
       .split(";")
       .map((v) => v.trim())
       .find((v) => v.startsWith("rifan_session="))
       ?.slice(14);
     const session = token
-      ? (s.db
+      ? ((await s.db
           .prepare("SELECT * FROM sessions WHERE token=? AND expires>?")
-          .get(tokenHash(token), Date.now()) as any)
+          .get(tokenHash(token), Date.now())) as any)
       : null;
     if (!session && req.originalUrl.split("?")[0] === "/api/google/callback")
       return res.redirect("/connections?google=sign_in_required");
@@ -211,7 +228,7 @@ export function createApi(
         .json({ error: "Sign in to access your RIFAN workspace." });
     let actor = JSON.parse(session.data) as Session;
     if (!actor.demo) {
-      const user = s.db
+      const user = await s.db
         .prepare("SELECT * FROM users WHERE id=? AND space=?")
         .get(actor.id, actor.space);
       if (!user)
@@ -220,15 +237,35 @@ export function createApi(
           .json({ error: "This account is no longer active." });
       actor = { ...actor, ...publicUser(user) };
     }
+    if (
+      actor.mustChangePassword &&
+      !["/api/auth/me", "/api/auth/logout", "/api/profile/password"].includes(
+        req.originalUrl.split("?")[0],
+      )
+    )
+      return res.status(403).json({
+        error:
+          "Change the initial administrator password before using this account.",
+        code: "PASSWORD_CHANGE_REQUIRED",
+      });
     (req as R).actor = actor;
     s.withActor(actor, () => next());
   };
-  const allowed = (actor: Session, entity: Entity, row: Row): boolean => {
+  const authenticate = (req: Request, res: Response, next: NextFunction) => {
+    authenticateAction(req, res, next).catch(next);
+  };
+  const allowed = async (
+    actor: Session,
+    entity: Entity,
+    row: Row,
+  ): Promise<boolean> => {
     if (["Super Admin", "Admin"].includes(actor.role)) return true;
     if (entity === "chats")
       return row.userId === actor.id && Array.isArray(row.messages);
     if (entity === "farmers")
-      return primaryScope(actor, row) || relationshipScope(s, actor, row.id);
+      return (
+        primaryScope(actor, row) || (await relationshipScope(s, actor, row.id))
+      );
     if (
       [
         "participations",
@@ -253,8 +290,8 @@ export function createApi(
         return false;
     }
     if (["seasons", "interventions"].includes(entity) && row.programId) {
-      const parent = s.get(actor.space, "programs", row.programId);
-      if (!parent || !allowed(actor, "programs", parent)) return false;
+      const parent = await s.get(actor.space, "programs", row.programId);
+      if (!parent || !(await allowed(actor, "programs", parent))) return false;
     }
     if (
       [
@@ -270,14 +307,14 @@ export function createApi(
       ].includes(entity) &&
       row.farmerId
     ) {
-      const farmer = s.get(actor.space, "farmers", row.farmerId);
-      return !!farmer && allowed(actor, "farmers", farmer);
+      const farmer = await s.get(actor.space, "farmers", row.farmerId);
+      return !!farmer && (await allowed(actor, "farmers", farmer));
     }
     if (entity === "warehouses" && actor.warehouseIds?.length)
       return actor.warehouseIds.includes(row.id);
     if (entity === "movements") {
-      const w = s.get(actor.space, "warehouses", row.warehouseId);
-      return !!w && allowed(actor, "warehouses", w);
+      const w = await s.get(actor.space, "warehouses", row.warehouseId);
+      return !!w && (await allowed(actor, "warehouses", w));
     }
     if (
       actor.organizationId &&
@@ -297,7 +334,7 @@ export function createApi(
     if (!canEdit(actor.role, entity))
       fail(403, "Your role does not allow this action.");
   };
-  const refCheck = (actor: Session, entity: Entity, row: Row) => {
+  const refCheck = async (actor: Session, entity: Entity, row: Row) => {
     for (const [key, target] of [
       ["organizationId", "organizations"],
       ["programId", "programs"],
@@ -305,8 +342,8 @@ export function createApi(
       ["warehouseId", "warehouses"],
     ] as [string, Entity][]) {
       if (row[key]) {
-        const ref = s.get(actor.space, target, row[key]);
-        if (!ref || !allowed(actor, target, ref))
+        const ref = await s.get(actor.space, target, row[key]);
+        if (!ref || !(await allowed(actor, target, ref)))
           fail(400, `Invalid or inaccessible ${key}`);
       }
     }
@@ -315,9 +352,9 @@ export function createApi(
         /^\/api\/files\/([a-f0-9-]+)$/,
       )?.[1];
       const photo = photoId
-        ? (s.db
+        ? ((await s.db
             .prepare("SELECT farmer_id,mime FROM files WHERE id=? AND space=?")
-            .get(photoId, actor.space) as any)
+            .get(photoId, actor.space)) as any)
         : null;
       if (
         !photo ||
@@ -330,7 +367,7 @@ export function createApi(
         );
     }
     if (entity === "farmers" && row.programId) {
-      const p = s.get(actor.space, "programs", row.programId)!;
+      const p = (await s.get(actor.space, "programs", row.programId))!;
       if (
         p.organizationId &&
         row.organizationId &&
@@ -339,15 +376,15 @@ export function createApi(
         fail(400, "Programme must belong to the selected organization");
     }
   };
-  const duplicate = (space: string, row: Row, except = "") => {
+  const duplicate = async (space: string, row: Row, except = "") => {
     for (const key of ["primaryPhone", "bvn", "nin", "farmerID"]) {
       if (!row[key]) continue;
       const values = key === "primaryPhone" ? phoneKeys(row[key]) : [row[key]];
-      const hit = s.db
+      const hit = (await s.db
         .prepare(
           `SELECT data FROM records WHERE space=? AND entity='farmers' AND json_extract(data,'$.${key}') IN (${values.map(() => "?").join(",")}) AND id<>? LIMIT 1`,
         )
-        .get(space, ...values, except) as any;
+        .get(space, ...values, except)) as any;
       if (hit) return JSON.parse(hit.data) as Row;
     }
     return undefined;
@@ -367,27 +404,34 @@ export function createApi(
       row.registrationRecordedAt || new Date().toISOString(),
   });
   security.mountPublic(app, issue);
-  app.get("/api/health", (_req, res) =>
-    res.json({ status: "ok", app: "RIFAN Connect", storage: "sqlite" }),
-  );
-  app.get("/api/auth/status", (_req, res) =>
-    res.json({
-      needsSetup: !s.db
-        .prepare("SELECT id FROM users WHERE space='workspace' LIMIT 1")
-        .get(),
-      demoEnabled,
+  app.get(
+    "/api/health",
+    safe(async (_req, res) => {
+      await s.db.prepare("SELECT 1 AS ready").get();
+      res.json({ status: "ok", app: "RIFAN Connect", storage: s.db.kind });
     }),
+  );
+  app.get(
+    "/api/auth/status",
+    safe(async (_req, res) =>
+      res.json({
+        needsSetup: !(await s.db
+          .prepare("SELECT id FROM users WHERE space='workspace' LIMIT 1")
+          .get()),
+        demoEnabled,
+      }),
+    ),
   );
   app.post(
     "/api/auth/demo",
     rateLimit,
-    safe((req, res) => {
+    safe(async (req, res) => {
       if (!demoEnabled) fail(404, "Demo workspace is disabled");
       const role = ROLES.includes(req.body.role)
         ? req.body.role
         : "Super Admin";
       res.json(
-        issue(res, {
+        await issue(res, {
           id: "demo-" + role.toLowerCase().replaceAll(" ", "-"),
           name: "Demo " + role,
           email: "demo@rifan.local",
@@ -401,55 +445,58 @@ export function createApi(
   app.post(
     "/api/auth/setup",
     rateLimit,
-    safe((req, res) => {
-      if (
-        s.db
-          .prepare("SELECT id FROM users WHERE space='workspace' LIMIT 1")
-          .get()
-      )
-        fail(409, "Workspace already initialized. Please sign in.");
-      const { email, password, name } = req.body;
-      if (
-        !email ||
-        !/^\S+@\S+\.\S+$/.test(email) ||
-        typeof password !== "string" ||
-        password.length < 12 ||
-        typeof name !== "string" ||
-        name.trim().length < 2
-      )
-        fail(
-          400,
-          "Use your name, a valid email and a password of at least 12 characters.",
-        );
-      const id = randomUUID(),
-        salt = randomBytes(16).toString("hex");
-      s.db
-        .prepare(
-          "INSERT INTO users(id,space,email,name,role,hash,salt) VALUES(?,'workspace',?,?,'Super Admin',?,?)",
+    safe(async (req, res) => {
+      const actor = await s.locked("rifan-bootstrap-admin", async () => {
+        if (
+          await s.db
+            .prepare("SELECT id FROM users WHERE space='workspace' LIMIT 1")
+            .get()
         )
-        .run(
+          fail(409, "Workspace already initialized. Please sign in.");
+        const { email, password, name } = req.body;
+        if (
+          !email ||
+          !/^\S+@\S+\.\S+$/.test(email) ||
+          typeof password !== "string" ||
+          password.length < 12 ||
+          typeof name !== "string" ||
+          name.trim().length < 2
+        )
+          fail(
+            400,
+            "Use your name, a valid email and a password of at least 12 characters.",
+          );
+        const id = randomUUID(),
+          salt = randomBytes(16).toString("hex");
+        await s.db
+          .prepare(
+            "INSERT INTO users(id,space,email,name,role,hash,salt) VALUES(?,'workspace',?,?,'Super Admin',?,?)",
+          )
+          .run(
+            id,
+            email.toLowerCase().trim(),
+            name.trim(),
+            hash(password, salt),
+            salt,
+          );
+        const actor: Session = {
           id,
-          email.toLowerCase().trim(),
-          name.trim(),
-          hash(password, salt),
-          salt,
+          name: name.trim(),
+          email: email.toLowerCase().trim(),
+          role: "Super Admin",
+          space: "workspace",
+          demo: false,
+        };
+        await s.audit(
+          actor,
+          "SETUP",
+          "workspace",
+          "workspace",
+          "Initialized independent RIFAN workspace",
         );
-      const actor: Session = {
-        id,
-        name: name.trim(),
-        email: email.toLowerCase().trim(),
-        role: "Super Admin",
-        space: "workspace",
-        demo: false,
-      };
-      s.audit(
-        actor,
-        "SETUP",
-        "workspace",
-        "workspace",
-        "Initialized independent RIFAN workspace",
-      );
-      res.status(201).json(issue(res, actor));
+        return actor;
+      });
+      res.status(201).json(await issue(res, actor));
     }),
   );
   app.post(
@@ -457,9 +504,9 @@ export function createApi(
     rateLimit,
     safe(async (req, res) => {
       const { email, password } = req.body;
-      const u = s.db
+      const u = (await s.db
         .prepare("SELECT * FROM users WHERE space='workspace' AND email=?")
-        .get(String(email).toLowerCase().trim()) as any;
+        .get(String(email).toLowerCase().trim())) as any;
       if (
         !u ||
         typeof password !== "string" ||
@@ -470,12 +517,12 @@ export function createApi(
         )
       )
         fail(401, "Email or password is incorrect");
-      if (security.needs(u)) {
+      if (await security.needs(u)) {
         res.json(await security.send(u, "login"));
         return;
       }
       res.json(
-        issue(res, {
+        await issue(res, {
           ...publicUser(u),
           space: u.space,
           demo: false,
@@ -486,14 +533,14 @@ export function createApi(
   app.post(
     "/api/auth/logout",
     authenticate,
-    safe((req, res) => {
+    safe(async (req, res) => {
       const token = (req.headers.cookie || "")
         .split(";")
         .map((v) => v.trim())
         .find((v) => v.startsWith("rifan_session="))
         ?.slice(14);
       if (token)
-        s.db
+        await s.db
           .prepare("DELETE FROM sessions WHERE token=?")
           .run(tokenHash(token));
       res.clearCookie("rifan_session");
@@ -505,12 +552,11 @@ export function createApi(
     authenticate,
     safe((req, res) => res.json(req.actor)),
   );
-
   app.post(
     "/api/public/applications",
     rateLimit,
-    safe((req, res) => {
-      const settings = s.settings("workspace");
+    safe(async (req, res) => {
+      const settings = await s.settings("workspace");
       if (
         !settings.publicRegistrationEnabled ||
         process.env.ENABLE_PUBLIC_REGISTRATION !== "true"
@@ -548,7 +594,7 @@ export function createApi(
         profileStatus: "Pending",
         kycComplete: false,
       });
-      if (duplicate("workspace", farmer))
+      if (await duplicate("workspace", farmer))
         fail(
           409,
           "An application or membership already exists for this phone. Contact your chapter for help.",
@@ -570,10 +616,10 @@ export function createApi(
         membershipFee: settings.membershipFee,
         currency: "NGN",
       };
-      s.transaction(() => {
-        s.put("workspace", "farmers", farmer);
-        s.put("workspace", "applications", application);
-        s.audit(
+      await s.transaction(async () => {
+        await s.put("workspace", "farmers", farmer);
+        await s.put("workspace", "applications", application);
+        await s.audit(
           {
             id: "public-registration",
             name: "Farmer website",
@@ -647,35 +693,41 @@ export function createApi(
   registerOperations(features);
   registerDataQuality({ ...features, duplicate, refCheck });
   payments.mountPrivate(features);
-  const summaries = new Map<string, { version: string; value: any }>();
-  const summaryFor = (actor: Session, filters: any = {}) => {
+  const summaries = new Map<
+    string,
+    {
+      version: string;
+      value: any;
+    }
+  >();
+  const summaryFor = async (actor: Session, filters: any = {}) => {
     const { where, args } = farmerWhere(actor, filters);
     const cacheKey = where + JSON.stringify(args);
-    const version = s.version();
+    const version = await s.version();
     const cached = summaries.get(cacheKey);
     if (cached?.version === version) return cached.value;
-    const totals = s.db
+    const totals = (await s.db
       .prepare(
-        `SELECT count(*) AS totalFarmers,coalesce(sum(cast(json_extract(data,'$.farmSize') AS REAL)),0) AS hectares,sum(json_extract(data,'$.profileStatus')='Active') AS active,sum(json_extract(data,'$.kycComplete')=1) AS verified,count(distinct json_extract(data,'$.state')) AS states,sum(json_extract(data,'$.registrationDate') IS NULL) AS undated,sum(json_type(data,'$.latitude') IN ('integer','real') AND json_type(data,'$.longitude') IN ('integer','real')) AS located FROM records WHERE ${where}`,
+        `SELECT count(*) AS totalFarmers,coalesce(sum(cast(json_extract(data,'$.farmSize') AS REAL)),0) AS hectares,sum(CASE WHEN json_extract(data,'$.profileStatus')='Active' THEN 1 ELSE 0 END) AS active,sum(CASE WHEN json_extract(data,'$.kycComplete')=1 THEN 1 ELSE 0 END) AS verified,count(distinct json_extract(data,'$.state')) AS states,sum(CASE WHEN json_extract(data,'$.registrationDate') IS NULL THEN 1 ELSE 0 END) AS undated,sum(CASE WHEN json_type(data,'$.latitude') IN ('integer','real') AND json_type(data,'$.longitude') IN ('integer','real') THEN 1 ELSE 0 END) AS located FROM records WHERE ${where}`,
       )
-      .get(...args) as any;
-    const grouped = (key: string) =>
-      s.db
+      .get(...args)) as any;
+    const grouped = async (key: string) =>
+      await s.db
         .prepare(
           `SELECT coalesce(json_extract(data,'$.${key}'),'Not recorded') AS name,count(*) AS members,coalesce(sum(cast(json_extract(data,'$.loanApproved') AS REAL)),0) AS loans FROM records WHERE ${where} GROUP BY name ORDER BY members DESC`,
         )
         .all(...args);
-    const registrations = s.db
+    const registrations = await s.db
       .prepare(
         `SELECT substr(json_extract(data,'$.registrationDate'),1,7) AS month,count(*) AS count FROM records WHERE ${where} GROUP BY month ORDER BY month`,
       )
       .all(...args);
     const value = {
       ...totals,
-      regions: grouped("state"),
-      genders: grouped("gender"),
-      crops: grouped("crop"),
-      organizations: grouped("organizationId"),
+      regions: await grouped("state"),
+      genders: await grouped("gender"),
+      crops: await grouped("crop"),
+      organizations: await grouped("organizationId"),
       registrations,
     };
     if (summaries.size > 50) summaries.clear();
@@ -684,28 +736,28 @@ export function createApi(
   };
   app.get(
     "/api/farmers",
-    safe((req, res) => {
+    safe(async (req, res) => {
       const { where, args } = farmerWhere(req.actor, req.query);
       const limit = Math.min(1000, Math.max(1, Number(req.query.limit) || 25)),
         offset = Math.max(0, Number(req.query.offset) || 0);
       const total = (
-        s.db
+        (await s.db
           .prepare(`SELECT count(*) AS n FROM records WHERE ${where}`)
-          .get(...args) as any
+          .get(...args)) as any
       ).n;
       const rows = (
-        s.db
+        (await s.db
           .prepare(
             `SELECT data FROM records WHERE ${where} ORDER BY rowid DESC LIMIT ? OFFSET ?`,
           )
-          .all(...args, limit, offset) as any[]
+          .all(...args, limit, offset)) as any[]
       ).map((r) => JSON.parse(r.data));
       res.json({ rows: redact(req.actor, rows), total, offset, limit });
     }),
   );
   app.post(
     "/api/cards/records",
-    safe((req, res) => {
+    safe(async (req, res) => {
       const ids = req.body.ids;
       if (
         !Array.isArray(ids) ||
@@ -714,9 +766,9 @@ export function createApi(
         ids.some((id: any) => typeof id !== "string")
       )
         fail(400, "Select between 1 and 500 member IDs");
-      const rows = [...new Set(ids as string[])].map((id) => {
-        const f = s.get(req.actor.space, "farmers", id);
-        if (!f || !allowed(req.actor, "farmers", f))
+      const rows = await asyncMap([...new Set(ids as string[])], async (id) => {
+        const f = await s.get(req.actor.space, "farmers", id);
+        if (!f || !(await allowed(req.actor, "farmers", f)))
           fail(
             404,
             "A selected member is unavailable or outside your access scope",
@@ -748,13 +800,13 @@ export function createApi(
   );
   app.post(
     "/api/cards/log",
-    safe((req, res) => {
+    safe(async (req, res) => {
       const ids = req.body.ids;
       if (!Array.isArray(ids) || ids.length < 1 || ids.length > 500)
         fail(400, "Select up to 500 member profiles");
       for (const id of ids) {
-        const f = s.get(req.actor.space, "farmers", String(id));
-        if (!f || !allowed(req.actor, "farmers", f))
+        const f = await s.get(req.actor.space, "farmers", String(id));
+        if (!f || !(await allowed(req.actor, "farmers", f)))
           fail(404, "Member unavailable or outside assigned scope");
       }
       const kind = ["PDF", "ZIP", "Print", "Certificate"].includes(
@@ -762,7 +814,7 @@ export function createApi(
       )
         ? req.body.kind
         : "PDF";
-      s.audit(
+      await s.audit(
         req.actor,
         "EXPORT",
         "member-cards",
@@ -774,49 +826,49 @@ export function createApi(
   );
   app.get(
     "/api/calendar",
-    safe((req, res) => {
+    safe(async (req, res) => {
       const month = String(req.query.month || "");
       if (!/^\d{4}-\d{2}$/.test(month)) fail(400, "Provide month as YYYY-MM");
       const { where, args } = farmerWhere(req.actor);
       const condition =
         "(substr(json_extract(data,'$.plantingDate'),1,7)=? OR substr(json_extract(data,'$.harvestDate'),1,7)=?)";
       const rows = (
-        s.db
+        (await s.db
           .prepare(
             `SELECT data FROM records WHERE ${where} AND ${condition} LIMIT 5000`,
           )
-          .all(...args, month, month) as any[]
+          .all(...args, month, month)) as any[]
       ).map((r) => JSON.parse(r.data));
       res.json(redact(req.actor, rows));
     }),
   );
   app.get(
     "/api/farmers/:id",
-    safe((req, res) => {
-      const f = s.get(req.actor.space, "farmers", req.params.id);
-      if (!f || !allowed(req.actor, "farmers", f))
+    safe(async (req, res) => {
+      const f = await s.get(req.actor.space, "farmers", req.params.id);
+      if (!f || !(await allowed(req.actor, "farmers", f)))
         fail(404, "Member not found");
       res.json(redact(req.actor, [f])[0]);
     }),
   );
   app.get(
     "/api/summary",
-    safe((req, res) => res.json(summaryFor(req.actor, req.query))),
+    safe(async (req, res) => res.json(await summaryFor(req.actor, req.query))),
   );
   app.get(
     "/api/snapshot",
-    safe((req, res) => {
+    safe(async (req, res) => {
       const a = req.actor;
       const { where, args } = farmerWhere(a);
       const farmerRows = (
-        s.db
+        (await s.db
           .prepare(
             `SELECT data FROM records WHERE ${where} ORDER BY rowid DESC LIMIT 1000`,
           )
-          .all(...args) as any[]
+          .all(...args)) as any[]
       ).map((r) => JSON.parse(r.data));
       const data = Object.fromEntries(
-        ENTITIES.map((e) => [
+        await asyncMap(ENTITIES, async (e) => [
           e,
           e === "farmers"
             ? farmerRows
@@ -826,19 +878,23 @@ export function createApi(
                   "fieldValidations",
                   "harvestTasks",
                 ].includes(e)
-              ? (
-                  s.db
-                    .prepare(
-                      "SELECT data FROM records WHERE space=? AND entity=? ORDER BY rowid DESC LIMIT 1000",
-                    )
-                    .all(a.space, e) as any[]
+              ? await asyncFilter(
+                  (
+                    (await s.db
+                      .prepare(
+                        "SELECT data FROM records WHERE space=? AND entity=? ORDER BY rowid DESC LIMIT 1000",
+                      )
+                      .all(a.space, e)) as any[]
+                  ).map((r) => JSON.parse(r.data)),
+                  async (r) => await allowed(a, e, r),
                 )
-                  .map((r) => JSON.parse(r.data))
-                  .filter((r) => allowed(a, e, r))
-              : s.all(a.space, e).filter((r) => allowed(a, e, r)),
+              : await asyncFilter(
+                  await s.all(a.space, e),
+                  async (r) => await allowed(a, e, r),
+                ),
         ]),
       );
-      const summary = summaryFor(a);
+      const summary = await summaryFor(a);
       if (!["Super Admin", "Admin", "Manager"].includes(a.role))
         for (const f of data.farmers) {
           delete f.bvn;
@@ -846,7 +902,7 @@ export function createApi(
           delete f.accountNumber;
         }
       const activity = ["Super Admin", "Admin", "Manager"].includes(a.role)
-        ? s.db
+        ? await s.db
             .prepare(
               "SELECT id,user_name AS userName,action,entity,entity_id AS entityId,details,timestamp FROM audit WHERE space=? ORDER BY id DESC LIMIT 300",
             )
@@ -854,9 +910,9 @@ export function createApi(
         : [];
       const users = ["Super Admin", "Admin"].includes(a.role)
         ? (
-            s.db
+            (await s.db
               .prepare("SELECT * FROM users WHERE space=?")
-              .all(a.space) as any[]
+              .all(a.space)) as any[]
           ).map(publicUser)
         : [];
       res.json({
@@ -866,26 +922,26 @@ export function createApi(
           loaded: farmerRows.length,
           total: summary.totalFarmers,
         },
-        settings: s.settings(a.space),
+        settings: await s.settings(a.space),
         activity,
         users,
         integrations: {
           gemini: !!process.env.GEMINI_API_KEY,
           google: googleConnection.configured,
-          googleConnected: googleConnection.status(a).connected,
+          googleConnected: (await googleConnection.status(a)).connected,
         },
       });
     }),
   );
   app.put(
     "/api/profile",
-    safe((req, res) => {
+    safe(async (req, res) => {
       const { name } = req.body;
       if (typeof name !== "string" || name.trim().length < 2)
         fail(400, "Name must be at least two characters");
       if (req.actor.demo)
         fail(400, "The demonstration account cannot be changed");
-      s.db
+      await s.db
         .prepare("UPDATE users SET name=? WHERE id=? AND space=?")
         .run(name.trim(), req.actor.id, req.actor.space);
       res.json({ success: true });
@@ -893,11 +949,11 @@ export function createApi(
   );
   app.put(
     "/api/profile/password",
-    safe((req, res) => {
+    safe(async (req, res) => {
       if (req.actor.demo) fail(400, "Demo account passwords cannot be changed");
-      const u = s.db
+      const u = (await s.db
         .prepare("SELECT * FROM users WHERE id=?")
-        .get(req.actor.id) as any;
+        .get(req.actor.id)) as any;
       const { currentPassword, password } = req.body;
       if (
         typeof currentPassword !== "string" ||
@@ -913,17 +969,34 @@ export function createApi(
         password.length > 1000
       )
         fail(400, "Use at least 12 characters");
+      if (u.must_change_password && password === currentPassword)
+        fail(
+          400,
+          "Choose a password different from the initial administrator password",
+        );
+      const email =
+        req.body.email === undefined
+          ? u.email
+          : String(req.body.email).trim().toLowerCase();
+      if (!/^\S+@\S+\.\S+$/.test(email))
+        fail(400, "Provide a valid account email");
       const salt = randomBytes(16).toString("hex");
-      s.db
-        .prepare("UPDATE users SET hash=?,salt=? WHERE id=?")
-        .run(hash(password, salt), salt, req.actor.id);
-      s.db.prepare("DELETE FROM sessions WHERE user_id=?").run(req.actor.id);
+      await s.transaction(async () => {
+        await s.db
+          .prepare(
+            "UPDATE users SET hash=?,salt=?,email=?,must_change_password=0 WHERE id=?",
+          )
+          .run(hash(password, salt), salt, email, req.actor.id);
+        await s.db
+          .prepare("DELETE FROM sessions WHERE user_id=?")
+          .run(req.actor.id);
+      });
       res.json({ success: true });
     }),
   );
   app.put(
     "/api/settings",
-    safe((req, res) => {
+    safe(async (req, res) => {
       requireWrite(req.actor, "settings");
       const keys = Object.keys(DEFAULT_SETTINGS);
       const updates = Object.fromEntries(
@@ -947,14 +1020,14 @@ export function createApi(
           fail(400, "Fees must be non-negative amounts");
       if (updates.requireTwoFactor && !security.configured())
         fail(503, "Configure branded OTP email delivery before requiring 2FA");
-      const settings = { ...s.settings(req.actor.space), ...updates };
-      s.transaction(() => {
-        s.db
+      const settings = { ...(await s.settings(req.actor.space)), ...updates };
+      await s.transaction(async () => {
+        await s.db
           .prepare(
             "INSERT INTO settings(space,data) VALUES(?,?) ON CONFLICT(space) DO UPDATE SET data=excluded.data",
           )
           .run(req.actor.space, JSON.stringify(settings));
-        s.audit(
+        await s.audit(
           req.actor,
           "UPDATE",
           "settings",
@@ -967,7 +1040,7 @@ export function createApi(
   );
   app.post(
     "/api/users",
-    safe((req, res) => {
+    safe(async (req, res) => {
       requireWrite(req.actor, "users");
       if (req.actor.demo)
         fail(
@@ -1009,7 +1082,7 @@ export function createApi(
           fail(400, "Access scope must contain lists of valid names or IDs");
       if (
         organizationId &&
-        !s.get(req.actor.space, "organizations", organizationId)
+        !(await s.get(req.actor.space, "organizations", organizationId))
       )
         fail(400, "Organization scope does not exist");
       const scope = {
@@ -1019,8 +1092,8 @@ export function createApi(
         warehouseIds,
         plannerApproved: req.body.plannerApproved === true,
       };
-      s.transaction(() => {
-        s.db
+      await s.transaction(async () => {
+        await s.db
           .prepare(
             "INSERT INTO users(id,space,email,name,role,hash,salt,scope) VALUES(?,?,?,?,?,?,?,?)",
           )
@@ -1034,7 +1107,7 @@ export function createApi(
             salt,
             JSON.stringify(scope),
           );
-        s.audit(
+        await s.audit(
           req.actor,
           "CREATE",
           "users",
@@ -1047,11 +1120,11 @@ export function createApi(
   );
   app.put(
     "/api/users/:id",
-    safe((req, res) => {
+    safe(async (req, res) => {
       requireWrite(req.actor, "users");
-      const u = s.db
+      const u = (await s.db
         .prepare("SELECT * FROM users WHERE id=? AND space=?")
-        .get(req.params.id, req.actor.space) as any;
+        .get(req.params.id, req.actor.space)) as any;
       if (!u) fail(404, "User not found");
       const role = req.body.role || u.role;
       if (!ROLES.includes(role)) fail(400, "Invalid role");
@@ -1074,7 +1147,11 @@ export function createApi(
           fail(400, "Access scope must contain lists of names or IDs");
       if (
         req.body.organizationId &&
-        !s.get(req.actor.space, "organizations", req.body.organizationId)
+        !(await s.get(
+          req.actor.space,
+          "organizations",
+          req.body.organizationId,
+        ))
       )
         fail(400, "Organization scope does not exist");
       const scope = Object.fromEntries(
@@ -1086,8 +1163,8 @@ export function createApi(
           "plannerApproved",
         ].map((k) => [k, req.body[k] ?? JSON.parse(u.scope || "{}")[k]]),
       );
-      s.transaction(() => {
-        s.db
+      await s.transaction(async () => {
+        await s.db
           .prepare("UPDATE users SET role=?,scope=? WHERE id=?")
           .run(role, JSON.stringify(scope), u.id);
         if (req.body.password) {
@@ -1097,12 +1174,12 @@ export function createApi(
           )
             fail(400, "Use at least 12 characters");
           const salt = randomBytes(16).toString("hex");
-          s.db
+          await s.db
             .prepare("UPDATE users SET hash=?,salt=? WHERE id=?")
             .run(hash(req.body.password, salt), salt, u.id);
-          s.db.prepare("DELETE FROM sessions WHERE user_id=?").run(u.id);
+          await s.db.prepare("DELETE FROM sessions WHERE user_id=?").run(u.id);
         }
-        s.audit(
+        await s.audit(
           req.actor,
           "UPDATE",
           "users",
@@ -1115,11 +1192,11 @@ export function createApi(
   );
   app.delete(
     "/api/users/:id",
-    safe((req, res) => {
+    safe(async (req, res) => {
       requireWrite(req.actor, "users");
-      const u = s.db
+      const u = (await s.db
         .prepare("SELECT * FROM users WHERE id=? AND space=?")
-        .get(req.params.id, req.actor.space) as any;
+        .get(req.params.id, req.actor.space)) as any;
       if (!u) fail(404, "User not found");
       if (u.id === req.actor.id)
         fail(400, "You cannot delete your own account");
@@ -1128,10 +1205,20 @@ export function createApi(
         ["Admin", "Super Admin"].includes(u.role)
       )
         fail(403, "Only a Super Admin can remove administrators");
-      s.transaction(() => {
-        s.db.prepare("DELETE FROM sessions WHERE user_id=?").run(u.id);
-        s.db.prepare("DELETE FROM users WHERE id=?").run(u.id);
-        s.audit(
+      const bootstrap = await s.db
+        .prepare(
+          "SELECT user_id FROM bootstrap_admin WHERE space=? AND user_id=?",
+        )
+        .get(req.actor.space, u.id);
+      if (bootstrap)
+        fail(
+          409,
+          "The persistent initial administrator cannot be deleted. Change its credentials or transfer access deliberately.",
+        );
+      await s.transaction(async () => {
+        await s.db.prepare("DELETE FROM sessions WHERE user_id=?").run(u.id);
+        await s.db.prepare("DELETE FROM users WHERE id=?").run(u.id);
+        await s.audit(
           req.actor,
           "DELETE",
           "users",
@@ -1142,15 +1229,14 @@ export function createApi(
       res.json({ success: true });
     }),
   );
-
   app.post(
     "/api/membership/payments",
-    safe((req, res) => {
+    safe(async (req, res) => {
       if (!["Super Admin", "Admin", "Manager"].includes(req.actor.role))
         fail(403, "Only an administrator or manager can record payments");
       const { farmerId, amount, reference, type, method, period } = req.body;
-      const farmer = s.get(req.actor.space, "farmers", farmerId);
-      if (!farmer || !allowed(req.actor, "farmers", farmer))
+      const farmer = await s.get(req.actor.space, "farmers", farmerId);
+      if (!farmer || !(await allowed(req.actor, "farmers", farmer)))
         fail(404, "Member not found");
       if (
         !Number.isFinite(Number(amount)) ||
@@ -1168,16 +1254,14 @@ export function createApi(
           "Provide a positive amount, receipt/reference, fee type and payment method",
         );
       if (
-        s
-          .all(req.actor.space, "payments")
-          .some(
-            (p) =>
-              String(p.reference).toUpperCase() ===
-              reference.trim().toUpperCase(),
-          )
+        (await s.all(req.actor.space, "payments")).some(
+          (p) =>
+            String(p.reference).toUpperCase() ===
+            reference.trim().toUpperCase(),
+        )
       )
         fail(409, "This transaction reference has already been recorded");
-      const settings = s.settings(req.actor.space);
+      const settings = await s.settings(req.actor.space);
       const expected =
         type === "Registration"
           ? Number(settings.registrationFee)
@@ -1201,9 +1285,9 @@ export function createApi(
         recordedBy: req.actor.id,
         expected,
       };
-      s.transaction(() => {
-        s.put(req.actor.space, "payments", row);
-        s.audit(
+      await s.transaction(async () => {
+        await s.put(req.actor.space, "payments", row);
+        await s.audit(
           req.actor,
           "PAYMENT_RECORDED",
           "payments",
@@ -1216,64 +1300,70 @@ export function createApi(
   );
   app.post(
     "/api/membership/payments/:id/verify",
-    safe((req, res) => {
+    safe(async (req, res) => {
       if (!["Super Admin", "Admin"].includes(req.actor.role))
         fail(403, "Only administrators can verify payments");
-      const row = s.get(req.actor.space, "payments", req.params.id);
-      if (!row) fail(404, "Payment not found");
-      if (row.status !== "Pending verification")
-        fail(409, "This payment has already been processed");
-      if (typeof req.body.approve !== "boolean")
-        fail(400, "Choose verify or reject explicitly");
-      const status = req.body.approve === true ? "Verified" : "Rejected";
-      s.transaction(() => {
-        s.put(req.actor.space, "payments", {
-          ...row,
-          status,
-          verifiedBy: req.actor.id,
-          verifiedAt: new Date().toISOString(),
-        });
-        paymentState(s, req.actor.space, row.farmerId);
-        s.audit(
-          req.actor,
-          "PAYMENT_" + status.toUpperCase(),
-          "payments",
-          row.id,
-          `${status} reference ${row.reference}`,
-        );
-      });
+      const status = await s.locked(
+        "manual-payment:" + req.params.id,
+        async () => {
+          const row = await s.get(req.actor.space, "payments", req.params.id);
+          if (!row) fail(404, "Payment not found");
+          if (row.status !== "Pending verification")
+            fail(409, "This payment has already been processed");
+          if (typeof req.body.approve !== "boolean")
+            fail(400, "Choose verify or reject explicitly");
+          const status = req.body.approve === true ? "Verified" : "Rejected";
+          await s.transaction(async () => {
+            await s.put(req.actor.space, "payments", {
+              ...row,
+              status,
+              verifiedBy: req.actor.id,
+              verifiedAt: new Date().toISOString(),
+            });
+            await paymentState(s, req.actor.space, row.farmerId);
+            await s.audit(
+              req.actor,
+              "PAYMENT_" + status.toUpperCase(),
+              "payments",
+              row.id,
+              `${status} reference ${row.reference}`,
+            );
+          });
+          return status;
+        },
+      );
       res.json({ success: true, status });
     }),
   );
   app.post(
     "/api/membership/applications/:id/review",
-    safe((req, res) => {
+    safe(async (req, res) => {
       if (!["Super Admin", "Admin", "Manager"].includes(req.actor.role))
         fail(403, "Only managers and administrators can review applications");
-      const row = s.get(req.actor.space, "applications", req.params.id);
-      if (!row || !allowed(req.actor, "applications", row))
+      const row = await s.get(req.actor.space, "applications", req.params.id);
+      if (!row || !(await allowed(req.actor, "applications", row)))
         fail(404, "Application not found");
       if (
         !["Approved", "Rejected", "Needs information"].includes(req.body.status)
       )
         fail(400, "Invalid review status");
-      s.transaction(() => {
-        s.put(req.actor.space, "applications", {
+      await s.transaction(async () => {
+        await s.put(req.actor.space, "applications", {
           ...row,
           status: req.body.status,
           notes: String(req.body.notes || ""),
           reviewedAt: new Date().toISOString(),
           reviewedBy: req.actor.id,
         });
-        const f = s.get(req.actor.space, "farmers", row.farmerId)!;
-        s.put(req.actor.space, "farmers", {
+        const f = (await s.get(req.actor.space, "farmers", row.farmerId))!;
+        await s.put(req.actor.space, "farmers", {
           ...f,
           membershipStatus:
             req.body.status === "Approved"
               ? "Awaiting payment"
               : req.body.status,
         });
-        s.audit(
+        await s.audit(
           req.actor,
           "REVIEW",
           "applications",
@@ -1286,50 +1376,59 @@ export function createApi(
   );
   app.post(
     "/api/stock",
-    safe((req, res) => {
+    safe(async (req, res) => {
       requireWrite(req.actor, "warehouses");
       const { warehouseId, type, quantity, reference } = req.body;
-      const w = s.get(req.actor.space, "warehouses", warehouseId);
-      if (!w || !allowed(req.actor, "warehouses", w))
-        fail(404, "Warehouse not found");
-      const q = Number(quantity);
-      if (
-        !Number.isFinite(q) ||
-        q <= 0 ||
-        !["Receipt", "Dispatch"].includes(type)
-      )
-        fail(400, "Use a positive quantity and Receipt or Dispatch");
-      if (w.status !== "Active")
-        fail(400, "Stock movements require an active warehouse");
-      const total =
-        Number(w.currentInventory || 0) + (type === "Receipt" ? q : -q);
-      if (total < 0 || total > Number(w.capacity))
-        fail(400, "Movement exceeds available stock or warehouse capacity");
-      const row = {
-        id: randomUUID(),
-        warehouseId,
-        type,
-        quantity: q,
-        reference: String(reference || ""),
-        date: new Date().toISOString(),
-      };
-      s.transaction(() => {
-        s.put(req.actor.space, "warehouses", { ...w, currentInventory: total });
-        s.put(req.actor.space, "movements", row);
-        s.audit(
-          req.actor,
-          "STOCK",
-          "warehouses",
-          warehouseId,
-          `${type}: ${q} MT at ${w.name}`,
-        );
-      });
+      const row = await s.locked(
+        `record:${req.actor.space}:warehouses:${warehouseId}`,
+        async () => {
+          const w = await s.get(req.actor.space, "warehouses", warehouseId);
+          if (!w || !(await allowed(req.actor, "warehouses", w)))
+            fail(404, "Warehouse not found");
+          const q = Number(quantity);
+          if (
+            !Number.isFinite(q) ||
+            q <= 0 ||
+            !["Receipt", "Dispatch"].includes(type)
+          )
+            fail(400, "Use a positive quantity and Receipt or Dispatch");
+          if (w.status !== "Active")
+            fail(400, "Stock movements require an active warehouse");
+          const total =
+            Number(w.currentInventory || 0) + (type === "Receipt" ? q : -q);
+          if (total < 0 || total > Number(w.capacity))
+            fail(400, "Movement exceeds available stock or warehouse capacity");
+          const row = {
+            id: randomUUID(),
+            warehouseId,
+            type,
+            quantity: q,
+            reference: String(reference || ""),
+            date: new Date().toISOString(),
+          };
+          await s.transaction(async () => {
+            await s.put(req.actor.space, "warehouses", {
+              ...w,
+              currentInventory: total,
+            });
+            await s.put(req.actor.space, "movements", row);
+            await s.audit(
+              req.actor,
+              "STOCK",
+              "warehouses",
+              warehouseId,
+              `${type}: ${q} MT at ${w.name}`,
+            );
+          });
+          return row;
+        },
+      );
       res.status(201).json(row);
     }),
   );
   app.post(
     "/api/import/stage",
-    safe((req, res) => {
+    safe(async (req, res) => {
       requireWrite(req.actor, "imports");
       const { rows, batchId, source, revalidate } = req.body;
       if (
@@ -1340,16 +1439,16 @@ export function createApi(
       )
         fail(400, "Stage up to 1,000 source records with a batch ID");
       const result = { valid: 0, invalid: 0, duplicates: 0, staged: 0 };
-      s.transaction(() => {
+      await s.transaction(async () => {
         for (const item of rows) {
           const offset = Number(item.sourceRow);
           if (!Number.isInteger(offset) || offset < 1)
             fail(400, "Source row must be a positive integer");
-          const existing = s.db
+          const existing = (await s.db
             .prepare(
               "SELECT id,status,raw FROM source_records WHERE batch_id=? AND space=? AND source_row=?",
             )
-            .get(batchId, req.actor.space, offset) as any;
+            .get(batchId, req.actor.space, offset)) as any;
           if (existing && (!revalidate || existing.status !== "Invalid"))
             continue;
           if (
@@ -1369,10 +1468,10 @@ export function createApi(
               ...item.data,
               id: randomUUID(),
             });
-            refCheck(req.actor, "farmers", normalized);
-            if (!allowed(req.actor, "farmers", normalized))
+            await refCheck(req.actor, "farmers", normalized);
+            if (!(await allowed(req.actor, "farmers", normalized)))
               fail(403, "Outside your assigned scope");
-            match = duplicate(req.actor.space, normalized);
+            match = await duplicate(req.actor.space, normalized);
             if (match) {
               status = "Duplicate";
               reason = "Existing member matches phone, BVN, NIN or member ID";
@@ -1382,7 +1481,7 @@ export function createApi(
             reason = (e as Error).message;
           }
           if (existing) {
-            s.db
+            await s.db
               .prepare(
                 "UPDATE source_records SET submitted=?,normalized=?,status=?,reason=?,farmer_id=? WHERE id=?",
               )
@@ -1395,7 +1494,7 @@ export function createApi(
                 existing.id,
               );
           } else {
-            s.db
+            await s.db
               .prepare(
                 "INSERT INTO source_records(batch_id,space,source_row,raw,normalized,status,reason,farmer_id,submitted) VALUES(?,?,?,?,?,?,?,?,?)",
               )
@@ -1416,8 +1515,8 @@ export function createApi(
           else if (status === "Duplicate") result.duplicates++;
           else result.invalid++;
         }
-        const existing = s.get(req.actor.space, "imports", batchId);
-        s.put(req.actor.space, "imports", {
+        const existing = await s.get(req.actor.space, "imports", batchId);
+        await s.put(req.actor.space, "imports", {
           id: batchId,
           name: String(source || "Source upload"),
           date: existing?.date || new Date().toISOString(),
@@ -1430,23 +1529,23 @@ export function createApi(
   );
   app.post(
     "/api/import/staged/:id/commit",
-    safe((req, res) => {
+    safe(async (req, res) => {
       requireWrite(req.actor, "imports");
-      const entries = s.db
+      const entries = (await s.db
         .prepare(
           "SELECT id,normalized FROM source_records WHERE space=? AND batch_id=? AND status='Valid' LIMIT 1000",
         )
-        .all(req.actor.space, req.params.id) as any[];
+        .all(req.actor.space, req.params.id)) as any[];
       let imported = 0,
         duplicates = 0;
-      s.transaction(() => {
+      await s.transaction(async () => {
         for (const item of entries) {
           let row = validate("farmers", JSON.parse(item.normalized));
-          if (!allowed(req.actor, "farmers", row))
+          if (!(await allowed(req.actor, "farmers", row)))
             fail(403, "Record is outside your assigned scope");
-          const match = duplicate(req.actor.space, row);
+          const match = await duplicate(req.actor.space, row);
           if (match) {
-            s.db
+            await s.db
               .prepare(
                 "UPDATE source_records SET status='Duplicate',reason='Matches another row in this import or an existing member',farmer_id=? WHERE id=?",
               )
@@ -1455,23 +1554,23 @@ export function createApi(
             continue;
           }
           row = cleanFarmer(row);
-          s.put(req.actor.space, "farmers", row);
-          s.db
+          await s.put(req.actor.space, "farmers", row);
+          await s.db
             .prepare(
               "UPDATE source_records SET status='Imported',farmer_id=? WHERE id=?",
             )
             .run(row.id, item.id);
           imported++;
         }
-        const history = s.get(req.actor.space, "imports", req.params.id);
+        const history = await s.get(req.actor.space, "imports", req.params.id);
         if (history)
-          s.put(req.actor.space, "imports", {
+          await s.put(req.actor.space, "imports", {
             ...history,
             status: "Importing",
             count: Number(history.count || 0) + imported,
           });
         if (entries.length)
-          s.audit(
+          await s.audit(
             req.actor,
             "BULK_IMPORT",
             "farmers",
@@ -1479,22 +1578,22 @@ export function createApi(
             `Committed ${imported} validated records; retained ${duplicates} duplicate source rows`,
           );
       });
-      const counts = s.db
+      const counts = (await s.db
         .prepare(
           "SELECT status,count(*) AS count FROM source_records WHERE space=? AND batch_id=? GROUP BY status",
         )
-        .all(req.actor.space, req.params.id) as any[];
+        .all(req.actor.space, req.params.id)) as any[];
       const remaining = counts.find((r) => r.status === "Valid")?.count || 0;
       if (!remaining) {
-        const history = s.get(req.actor.space, "imports", req.params.id);
+        const history = await s.get(req.actor.space, "imports", req.params.id);
         if (history)
-          s.put(req.actor.space, "imports", {
+          await s.put(req.actor.space, "imports", {
             ...history,
             status: "Completed with review",
             summary: Object.fromEntries(counts.map((c) => [c.status, c.count])),
           });
       }
-      reconcileImport(s, req.actor.space, req.params.id);
+      await reconcileImport(s, req.actor.space, req.params.id);
       res.json({
         imported,
         duplicates,
@@ -1505,9 +1604,9 @@ export function createApi(
   );
   app.get(
     "/api/import/issues/:id",
-    safe((req, res) => {
+    safe(async (req, res) => {
       requireWrite(req.actor, "imports");
-      const rows = s.db
+      const rows = await s.db
         .prepare(
           "SELECT source_row AS sourceRow,status,reason FROM source_records WHERE space=? AND batch_id=? AND status IN ('Invalid','Duplicate') ORDER BY source_row LIMIT 500",
         )
@@ -1520,21 +1619,21 @@ export function createApi(
   );
   app.get(
     "/api/import/review/:id",
-    safe((req, res) => {
+    safe(async (req, res) => {
       if (!["Super Admin", "Admin", "Manager"].includes(req.actor.role))
         fail(403, "A manager or administrator must review source identities");
       const offset = Math.max(0, Number(req.query.offset) || 0);
-      const rows = s.db
+      const rows = (await s.db
         .prepare(
           "SELECT source_row AS sourceRow,status,reason,raw,normalized,farmer_id AS farmerId FROM source_records WHERE space=? AND batch_id=? AND status IN ('Invalid','Duplicate') ORDER BY source_row LIMIT 25 OFFSET ?",
         )
-        .all(req.actor.space, req.params.id, offset) as any[];
+        .all(req.actor.space, req.params.id, offset)) as any[];
       const total = (
-        s.db
+        (await s.db
           .prepare(
             "SELECT count(*) AS n FROM source_records WHERE space=? AND batch_id=? AND status IN ('Invalid','Duplicate')",
           )
-          .get(req.actor.space, req.params.id) as any
+          .get(req.actor.space, req.params.id)) as any
       ).n;
       res.json({
         total,
@@ -1556,17 +1655,17 @@ export function createApi(
   );
   app.put(
     "/api/import/correct/:id/:row",
-    safe((req, res) => {
+    safe(async (req, res) => {
       if (!["Super Admin", "Admin", "Manager"].includes(req.actor.role))
         fail(
           403,
           "Only managers or administrators can correct reviewed imports",
         );
-      const source = s.db
+      const source = (await s.db
         .prepare(
           "SELECT * FROM source_records WHERE space=? AND batch_id=? AND source_row=?",
         )
-        .get(req.actor.space, req.params.id, Number(req.params.row)) as any;
+        .get(req.actor.space, req.params.id, Number(req.params.row))) as any;
       if (!source) fail(404, "Source row not found");
       if (source.status !== "Invalid")
         fail(
@@ -1579,18 +1678,18 @@ export function createApi(
         kycComplete: false,
         profileStatus: "Pending",
       });
-      refCheck(req.actor, "farmers", row);
-      if (!allowed(req.actor, "farmers", row))
+      await refCheck(req.actor, "farmers", row);
+      if (!(await allowed(req.actor, "farmers", row)))
         fail(403, "Corrected record is outside your assigned scope");
-      if (duplicate(req.actor.space, row))
+      if (await duplicate(req.actor.space, row))
         fail(
           409,
           "Correction matches an existing member. Review the existing profile rather than creating a duplicate.",
         );
       row = cleanFarmer(row);
-      s.transaction(() => {
-        s.put(req.actor.space, "farmers", row);
-        s.db
+      await s.transaction(async () => {
+        await s.put(req.actor.space, "farmers", row);
+        await s.db
           .prepare(
             "UPDATE source_records SET normalized=?,status='Imported',reason=?,farmer_id=? WHERE id=?",
           )
@@ -1600,21 +1699,21 @@ export function createApi(
             row.id,
             source.id,
           );
-        const history = s.get(req.actor.space, "imports", req.params.id);
+        const history = await s.get(req.actor.space, "imports", req.params.id);
         if (history) {
-          const counts = s.db
+          const counts = (await s.db
             .prepare(
               "SELECT status,count(*) AS count FROM source_records WHERE space=? AND batch_id=? GROUP BY status",
             )
-            .all(req.actor.space, req.params.id) as any[];
-          s.put(req.actor.space, "imports", {
+            .all(req.actor.space, req.params.id)) as any[];
+          await s.put(req.actor.space, "imports", {
             ...history,
             count: Number(history.count || 0) + 1,
             summary: Object.fromEntries(counts.map((c) => [c.status, c.count])),
           });
         }
-        reconcileImport(s, req.actor.space, req.params.id);
-        s.audit(
+        await reconcileImport(s, req.actor.space, req.params.id);
+        await s.audit(
           req.actor,
           "CORRECT_IMPORT",
           "farmers",
@@ -1627,13 +1726,13 @@ export function createApi(
   );
   app.post(
     "/api/import/preview",
-    safe((req, res) => {
+    safe(async (req, res) => {
       requireWrite(req.actor, "imports");
       const { rows } = req.body;
       if (!Array.isArray(rows) || rows.length > 5000)
         fail(400, "Provide up to 5,000 rows per import");
       const seen = new Set<string>();
-      const checked = rows.map((input: any, i: number) => {
+      const checked = await asyncMap(rows, async (input: any, i: number) => {
         try {
           const row = validate("farmers", {
             gender: "Other",
@@ -1642,10 +1741,10 @@ export function createApi(
             ...input,
             id: randomUUID(),
           });
-          refCheck(req.actor, "farmers", row);
-          if (!allowed(req.actor, "farmers", row))
+          await refCheck(req.actor, "farmers", row);
+          if (!(await allowed(req.actor, "farmers", row)))
             throw new Error("Outside your assigned organization or location");
-          const d = duplicate(req.actor.space, row);
+          const d = await duplicate(req.actor.space, row);
           const keys = ["primaryPhone", "bvn", "nin", "farmerID"]
             .filter((k) => row[k])
             .map(
@@ -1686,14 +1785,14 @@ export function createApi(
   );
   app.post(
     "/api/import/commit",
-    safe((req, res) => {
+    safe(async (req, res) => {
       requireWrite(req.actor, "imports");
       const { rows, source } = req.body;
       if (!Array.isArray(rows) || !rows.length || rows.length > 5000)
         fail(400, "Provide 1–5,000 valid rows");
       const id = randomUUID();
       let count = 0;
-      s.transaction(() => {
+      await s.transaction(async () => {
         for (const input of rows) {
           let row = validate("farmers", {
             gender: "Other",
@@ -1701,26 +1800,26 @@ export function createApi(
             ...input,
             id: randomUUID(),
           });
-          refCheck(req.actor, "farmers", row);
-          if (!allowed(req.actor, "farmers", row))
+          await refCheck(req.actor, "farmers", row);
+          if (!(await allowed(req.actor, "farmers", row)))
             fail(403, "Import contains records outside your access scope");
-          if (duplicate(req.actor.space, row))
+          if (await duplicate(req.actor.space, row))
             fail(
               409,
               "Duplicate detected. Preview the file again before importing.",
             );
           row = cleanFarmer(row);
-          s.put(req.actor.space, "farmers", row);
+          await s.put(req.actor.space, "farmers", row);
           count++;
         }
-        s.put(req.actor.space, "imports", {
+        await s.put(req.actor.space, "imports", {
           id,
           name: String(source || "File import"),
           date: new Date().toISOString(),
           count,
           status: "Completed",
         });
-        s.audit(
+        await s.audit(
           req.actor,
           "BULK_IMPORT",
           "farmers",
@@ -1733,13 +1832,14 @@ export function createApi(
   );
   app.post(
     "/api/alerts/generate",
-    safe((req, res) => {
+    safe(async (req, res) => {
       requireWrite(req.actor, "alerts");
       let count = 0;
-      s.transaction(() => {
-        for (const f of s
-          .all(req.actor.space, "farmers")
-          .filter((f) => allowed(req.actor, "farmers", f))) {
+      await s.transaction(async () => {
+        for (const f of await asyncFilter(
+          await s.all(req.actor.space, "farmers"),
+          async (f) => await allowed(req.actor, "farmers", f),
+        )) {
           const harvest = f.harvestDate
             ? Math.ceil((Date.parse(f.harvestDate) - Date.now()) / 86400000)
             : null;
@@ -1765,8 +1865,8 @@ export function createApi(
           ].filter(Boolean) as any[];
           for (const rule of rules) {
             const id = `auto-${f.id}-${rule.key}`;
-            if (!s.get(req.actor.space, "alerts", id)) {
-              s.put(req.actor.space, "alerts", {
+            if (!(await s.get(req.actor.space, "alerts", id))) {
+              await s.put(req.actor.space, "alerts", {
                 ...rule,
                 id,
                 farmerId: f.id,
@@ -1777,7 +1877,7 @@ export function createApi(
             }
           }
         }
-        s.audit(
+        await s.audit(
           req.actor,
           "GENERATE",
           "alerts",
@@ -1790,10 +1890,10 @@ export function createApi(
   );
   app.post(
     "/api/files/:farmerId",
-    safe((req, res) => {
+    safe(async (req, res) => {
       requireWrite(req.actor, "farmers");
-      const f = s.get(req.actor.space, "farmers", req.params.farmerId);
-      if (!f || !allowed(req.actor, "farmers", f))
+      const f = await s.get(req.actor.space, "farmers", req.params.farmerId);
+      if (!f || !(await allowed(req.actor, "farmers", f)))
         fail(404, "Farmer not found");
       const { name, mime, base64 } = req.body;
       if (
@@ -1824,8 +1924,8 @@ export function createApi(
       if (buffer.length > 4 * 1024 * 1024 || buffer.length === 0)
         fail(400, "Document must be between 1 byte and 4 MB");
       const id = randomUUID();
-      s.transaction(() => {
-        s.db
+      await s.transaction(async () => {
+        await s.db
           .prepare(
             "INSERT INTO files(id,space,farmer_id,name,mime,data,created) VALUES(?,?,?,?,?,?,?)",
           )
@@ -1838,7 +1938,7 @@ export function createApi(
             buffer,
             new Date().toISOString(),
           );
-        s.put(req.actor.space, "farmers", {
+        await s.put(req.actor.space, "farmers", {
           ...f,
           documents: [
             ...(f.documents || []),
@@ -1852,7 +1952,7 @@ export function createApi(
             },
           ],
         });
-        s.audit(
+        await s.audit(
           req.actor,
           "UPLOAD",
           "farmers",
@@ -1865,13 +1965,13 @@ export function createApi(
   );
   app.get(
     "/api/files/:id",
-    safe((req, res) => {
-      const file = s.db
+    safe(async (req, res) => {
+      const file = (await s.db
         .prepare("SELECT * FROM files WHERE id=? AND space=?")
-        .get(req.params.id, req.actor.space) as any;
+        .get(req.params.id, req.actor.space)) as any;
       if (!file) fail(404, "Document not found");
-      const f = s.get(req.actor.space, "farmers", file.farmer_id);
-      if (!f || !allowed(req.actor, "farmers", f))
+      const f = await s.get(req.actor.space, "farmers", file.farmer_id);
+      if (!f || !(await allowed(req.actor, "farmers", f)))
         fail(403, "Document is outside your access scope");
       res.setHeader("Content-Type", file.mime);
       res.setHeader(
@@ -1883,23 +1983,23 @@ export function createApi(
   );
   app.delete(
     "/api/files/:id",
-    safe((req, res) => {
+    safe(async (req, res) => {
       requireWrite(req.actor, "farmers");
-      const file = s.db
+      const file = (await s.db
         .prepare("SELECT * FROM files WHERE id=? AND space=?")
-        .get(req.params.id, req.actor.space) as any;
+        .get(req.params.id, req.actor.space)) as any;
       if (!file) fail(404, "Document not found");
-      const f = s.get(req.actor.space, "farmers", file.farmer_id);
-      if (!f || !allowed(req.actor, "farmers", f))
+      const f = await s.get(req.actor.space, "farmers", file.farmer_id);
+      if (!f || !(await allowed(req.actor, "farmers", f)))
         fail(403, "Document is outside your access scope");
-      s.transaction(() => {
-        s.db.prepare("DELETE FROM files WHERE id=?").run(file.id);
-        s.put(req.actor.space, "farmers", {
+      await s.transaction(async () => {
+        await s.db.prepare("DELETE FROM files WHERE id=?").run(file.id);
+        await s.put(req.actor.space, "farmers", {
           ...f,
           documents: (f.documents || []).filter((d: any) => d.id !== file.id),
           ...(f.photo === "/api/files/" + file.id ? { photo: "" } : {}),
         });
-        s.audit(
+        await s.audit(
           req.actor,
           "DELETE",
           "farmers",
@@ -1943,7 +2043,11 @@ export function createApi(
           systemInstruction:
             "You are the RIFAN agricultural extension advisor for Nigerian rice farmers. Provide practical, locally relevant rice, irrigation, soil, seed, pest, harvest and storage advice. State uncertainty, do not fabricate locations or prices. Ask for location, season and crop stage when needed. This is advisory guidance, not a substitute for a field agronomist. Use only this recorded aggregate evidence for claims about the workspace; do not infer individual identities or missing measurements: " +
             JSON.stringify(
-              intelligenceFor(features, req.actor, req.body.filters || {}),
+              await intelligenceFor(
+                features,
+                req.actor,
+                req.body.filters || {},
+              ),
             ),
         },
       });
@@ -1956,7 +2060,7 @@ export function createApi(
         ],
         date: new Date().toISOString(),
       };
-      s.put(req.actor.space, "chats", row);
+      await s.put(req.actor.space, "chats", row);
       res.json({ text: response.text, conversationId: row.id });
     }),
   );
@@ -2031,10 +2135,14 @@ export function createApi(
         updates = 0,
         invalid = 0;
       const seen = new Set<string>();
-      const rows = rawRows
-        .map((cells: any[], index: number) => ({ cells, sourceRow: index + 2 }))
-        .filter(({ cells }) => cells.some((v) => v !== "" && v !== null))
-        .map(({ cells, sourceRow }) => {
+      const rows = await asyncMap(
+        rawRows
+          .map((cells: any[], index: number) => ({
+            cells,
+            sourceRow: index + 2,
+          }))
+          .filter(({ cells }) => cells.some((v) => v !== "" && v !== null)),
+        async ({ cells, sourceRow }) => {
           const raw = Object.fromEntries(
             headers.map((h: any, j: number) => [h, cells[j] ?? ""]),
           );
@@ -2042,8 +2150,8 @@ export function createApi(
           try {
             const normalized = normalizeInput(raw, mapping).data;
             submitted = normalized;
-            let match = duplicate(req.actor.space, normalized as Row);
-            if (match && !allowed(req.actor, "farmers", match))
+            let match = await duplicate(req.actor.space, normalized as Row);
+            if (match && !(await allowed(req.actor, "farmers", match)))
               throw new Error("Matching member is outside assigned scope");
             const key = match?.id || canonicalPhone(normalized.primaryPhone);
             if (seen.has(key))
@@ -2061,8 +2169,8 @@ export function createApi(
               ...changes,
               id: match?.id || randomUUID(),
             });
-            refCheck(req.actor, "farmers", data);
-            if (!allowed(req.actor, "farmers", data))
+            await refCheck(req.actor, "farmers", data);
+            if (!(await allowed(req.actor, "farmers", data)))
               throw new Error("Outside assigned scope");
             if (match) updates++;
             else additions++;
@@ -2088,8 +2196,9 @@ export function createApi(
               raw,
             };
           }
-        });
-      s.put(req.actor.space, "chats", {
+        },
+      );
+      await s.put(req.actor.space, "chats", {
         id: "sheet-preview-" + previewId,
         userId: req.actor.id,
         expires: Date.now() + 1800000,
@@ -2107,9 +2216,9 @@ export function createApi(
   );
   app.post(
     "/api/google/sheets/sync/commit",
-    safe((req, res) => {
+    safe(async (req, res) => {
       requireWrite(req.actor, "farmers");
-      const preview = s.get(
+      const preview = await s.get(
         req.actor.space,
         "chats",
         "sheet-preview-" + req.body.previewId,
@@ -2122,10 +2231,10 @@ export function createApi(
         fail(409, "Sheet preview expired. Read the sheet again.");
       let created = 0,
         updated = 0;
-      s.transaction(() => {
+      await s.transaction(async () => {
         for (const row of preview.rows) {
           if (row.status === "Invalid") {
-            s.db
+            await s.db
               .prepare(
                 "INSERT OR IGNORE INTO source_records(batch_id,space,source_row,raw,normalized,status,reason,farmer_id,submitted) VALUES(?,?,?,?,?,?,?,?,?)",
               )
@@ -2144,28 +2253,32 @@ export function createApi(
           }
           let data = validate("farmers", row.data);
           if (row.matchId) {
-            const current = s.get(req.actor.space, "farmers", row.matchId);
+            const current = await s.get(
+              req.actor.space,
+              "farmers",
+              row.matchId,
+            );
             if (!current || tokenHash(JSON.stringify(current)) !== row.version)
               fail(
                 409,
                 "A member changed since this preview. Refresh the sheet preview to avoid overwriting newer data.",
               );
-            if (!allowed(req.actor, "farmers", current))
+            if (!(await allowed(req.actor, "farmers", current)))
               fail(403, "Member is outside assigned scope");
             data.updatedAt = new Date().toISOString();
-            s.put(req.actor.space, "farmers", data);
+            await s.put(req.actor.space, "farmers", data);
             updated++;
           } else {
-            if (duplicate(req.actor.space, data))
+            if (await duplicate(req.actor.space, data))
               fail(
                 409,
                 "A duplicate was added after preview. Refresh before synchronizing.",
               );
             data = cleanFarmer(data);
-            s.put(req.actor.space, "farmers", data);
+            await s.put(req.actor.space, "farmers", data);
             created++;
           }
-          s.db
+          await s.db
             .prepare(
               "INSERT OR IGNORE INTO source_records(batch_id,space,source_row,raw,normalized,status,reason,farmer_id,submitted) VALUES(?,?,?,?,?,?,?,?,?)",
             )
@@ -2183,7 +2296,7 @@ export function createApi(
                 : JSON.stringify(row.data),
             );
         }
-        s.put(req.actor.space, "imports", {
+        await s.put(req.actor.space, "imports", {
           id: preview.id,
           name: "Google Sheets synchronization",
           date: new Date().toISOString(),
@@ -2199,8 +2312,8 @@ export function createApi(
               .length,
           },
         });
-        s.remove(req.actor.space, "chats", preview.id);
-        s.audit(
+        await s.remove(req.actor.space, "chats", preview.id);
+        await s.audit(
           req.actor,
           "SHEET_SYNC",
           "farmers",
@@ -2247,8 +2360,8 @@ export function createApi(
         url: r.data.spreadsheetUrl,
         date: new Date().toISOString(),
       };
-      s.put(req.actor.space, "workbooks", row);
-      s.audit(
+      await s.put(req.actor.space, "workbooks", row);
+      await s.audit(
         req.actor,
         "CREATE",
         "workbooks",
@@ -2282,9 +2395,10 @@ export function createApi(
         const { google, auth } = await googleFor(req.actor);
         service = google.sheets({ version: "v4", auth });
       }
-      const rows = s
-        .all(req.actor.space, "farmers")
-        .filter((f) => allowed(req.actor, "farmers", f));
+      const rows = await asyncFilter(
+        await s.all(req.actor.space, "farmers"),
+        async (f) => await allowed(req.actor, "farmers", f),
+      );
       const keys = [
         "farmerID",
         "firstName",
@@ -2372,7 +2486,7 @@ export function createApi(
             requestBody: { values: values.slice(offset, offset + 5000) },
           });
       }
-      s.audit(
+      await s.audit(
         req.actor,
         "EXPORT",
         "farmers",
@@ -2428,9 +2542,10 @@ export function createApi(
       const r = await docs.documents.create({
         requestBody: { title: "RIFAN Membership Report" },
       });
-      const farmers = s
-        .all(req.actor.space, "farmers")
-        .filter((f) => allowed(req.actor, "farmers", f));
+      const farmers = await asyncFilter(
+        await s.all(req.actor.space, "farmers"),
+        async (f) => await allowed(req.actor, "farmers", f),
+      );
       await docs.documents.batchUpdate({
         documentId: r.data.documentId!,
         requestBody: {
@@ -2451,7 +2566,7 @@ export function createApi(
           ],
         },
       });
-      s.audit(
+      await s.audit(
         req.actor,
         "EXPORT",
         "farmers",
@@ -2467,8 +2582,8 @@ export function createApi(
     "/api/google/alerts/:id/email",
     safe(async (req, res) => {
       requireWrite(req.actor, "alerts");
-      const row = s.get(req.actor.space, "alerts", req.params.id);
-      if (!row || !allowed(req.actor, "alerts", row))
+      const row = await s.get(req.actor.space, "alerts", req.params.id);
+      if (!row || !(await allowed(req.actor, "alerts", row)))
         fail(404, "Alert not found");
       const to = String(req.body.to || "");
       if (!/^[^\s@\r\n]+@[^\s@\r\n]+\.[^\s@\r\n]+$/.test(to))
@@ -2486,14 +2601,14 @@ export function createApi(
         .users.messages.send({ userId: "me", requestBody: { raw } });
       if (!response.data.id)
         fail(502, "Email provider did not confirm delivery acceptance");
-      s.transaction(() => {
-        s.put(req.actor.space, "alerts", {
+      await s.transaction(async () => {
+        await s.put(req.actor.space, "alerts", {
           ...row,
           emailStatus: "Accepted by Gmail",
           emailSentAt: new Date().toISOString(),
           emailMessageId: response.data.id,
         });
-        s.audit(
+        await s.audit(
           req.actor,
           "EMAIL",
           "alerts",
@@ -2506,12 +2621,12 @@ export function createApi(
   );
   app.post(
     "/api/export/log",
-    safe((req, res) => {
+    safe(async (req, res) => {
       if (
         !["Super Admin", "Admin", "Manager", "Viewer"].includes(req.actor.role)
       )
         fail(403, "Your role does not allow exports");
-      s.audit(
+      await s.audit(
         req.actor,
         "EXPORT",
         String(req.body.entity || "report"),
@@ -2524,7 +2639,7 @@ export function createApi(
   // Generic document CRUD; specialized ledgers/history are never directly mutable.
   app.post(
     "/api/records/:entity",
-    safe((req, res) => {
+    safe(async (req, res) => {
       const entity = req.params.entity as Entity;
       if (
         !ENTITIES.includes(entity) ||
@@ -2544,13 +2659,13 @@ export function createApi(
         id: randomUUID(),
         createdAt: new Date().toISOString(),
       });
-      refCheck(req.actor, entity, row);
-      validateLinks(features, req.actor, entity, row);
-      if (!allowed(req.actor, entity, row))
+      await refCheck(req.actor, entity, row);
+      await validateLinks(features, req.actor, entity, row);
+      if (!(await allowed(req.actor, entity, row)))
         fail(403, "Record is outside your assigned scope");
       if (entity === "farmers") {
         if (row.farmBoundary) validateBoundary(row.farmBoundary);
-        if (duplicate(req.actor.space, row))
+        if (await duplicate(req.actor.space, row))
           fail(
             409,
             "A member with this phone, member ID or identity already exists",
@@ -2568,9 +2683,9 @@ export function createApi(
       }
       if (entity === "warehouses") row.currentInventory = 0;
       if (entity === "alerts") row.status = "Open";
-      s.transaction(() => {
-        s.put(req.actor.space, entity, row);
-        s.audit(
+      await s.transaction(async () => {
+        await s.put(req.actor.space, entity, row);
+        await s.audit(
           req.actor,
           "CREATE",
           entity,
@@ -2583,7 +2698,7 @@ export function createApi(
   );
   app.put(
     "/api/records/:entity/:id",
-    safe((req, res) => {
+    safe(async (req, res) => {
       const entity = req.params.entity as Entity;
       if (
         !ENTITIES.includes(entity) ||
@@ -2598,66 +2713,76 @@ export function createApi(
       )
         fail(404, "Unknown or immutable collection");
       requireWrite(req.actor, entity);
-      const old = s.get(req.actor.space, entity, req.params.id);
-      if (!old || !allowed(req.actor, entity, old))
-        fail(404, "Record not found");
-      if (entity === "farmLocations")
-        fail(
-          409,
-          "Historical farm observations are immutable. Create a new observation linked to the activity.",
-        );
-      if (entity === "fieldValidations" && old.status === "Verified")
-        fail(
-          409,
-          "Approved field evidence is immutable. Submit a new validation.",
-        );
-      if (
-        req.body.expectedUpdatedAt !== undefined &&
-        req.body.expectedUpdatedAt !== (old.updatedAt || old.createdAt || "")
-      )
-        fail(
-          409,
-          "This record changed since it was opened. Reload before editing.",
-        );
-      const row = validate(entity, {
-        ...old,
-        ...req.body,
-        id: old.id,
-        updatedAt: new Date().toISOString(),
-      });
-      refCheck(req.actor, entity, row);
-      validateLinks(features, req.actor, entity, row);
-      if (!allowed(req.actor, entity, row))
-        fail(403, "Updated record is outside your assigned scope");
-      if (entity === "farmers" && row.farmBoundary)
-        validateBoundary(row.farmBoundary);
-      if (entity === "farmers" && duplicate(req.actor.space, row, old.id))
-        fail(409, "Another member already has this phone or identity");
-      if (entity === "warehouses") {
-        row.currentInventory = old.currentInventory;
-        if (Number(row.capacity) < Number(old.currentInventory))
-          fail(400, "Capacity cannot be less than current inventory");
-      }
-      s.transaction(() => {
-        s.put(req.actor.space, entity, row);
-        s.audit(
-          req.actor,
-          "UPDATE",
-          entity,
-          row.id,
-          `Updated ${row.name || row.title || names(row) || entity}; fields: ${Object.keys(
-            req.body,
+      const updated = await s.locked(
+        `record:${req.actor.space}:${entity}:${req.params.id}`,
+        async () => {
+          const old = await s.get(req.actor.space, entity, req.params.id);
+          if (!old || !(await allowed(req.actor, entity, old)))
+            fail(404, "Record not found");
+          if (entity === "farmLocations")
+            fail(
+              409,
+              "Historical farm observations are immutable. Create a new observation linked to the activity.",
+            );
+          if (entity === "fieldValidations" && old.status === "Verified")
+            fail(
+              409,
+              "Approved field evidence is immutable. Submit a new validation.",
+            );
+          if (
+            req.body.expectedUpdatedAt !== undefined &&
+            req.body.expectedUpdatedAt !==
+              (old.updatedAt || old.createdAt || "")
           )
-            .filter((k) => !["bvn", "nin", "accountNumber"].includes(k))
-            .join(", ")}`,
-        );
-      });
-      res.json(row);
+            fail(
+              409,
+              "This record changed since it was opened. Reload before editing.",
+            );
+          const row = validate(entity, {
+            ...old,
+            ...req.body,
+            id: old.id,
+            updatedAt: new Date().toISOString(),
+          });
+          await refCheck(req.actor, entity, row);
+          await validateLinks(features, req.actor, entity, row);
+          if (!(await allowed(req.actor, entity, row)))
+            fail(403, "Updated record is outside your assigned scope");
+          if (entity === "farmers" && row.farmBoundary)
+            validateBoundary(row.farmBoundary);
+          if (
+            entity === "farmers" &&
+            (await duplicate(req.actor.space, row, old.id))
+          )
+            fail(409, "Another member already has this phone or identity");
+          if (entity === "warehouses") {
+            row.currentInventory = old.currentInventory;
+            if (Number(row.capacity) < Number(old.currentInventory))
+              fail(400, "Capacity cannot be less than current inventory");
+          }
+          await s.transaction(async () => {
+            await s.put(req.actor.space, entity, row);
+            await s.audit(
+              req.actor,
+              "UPDATE",
+              entity,
+              row.id,
+              `Updated ${row.name || row.title || names(row) || entity}; fields: ${Object.keys(
+                req.body,
+              )
+                .filter((k) => !["bvn", "nin", "accountNumber"].includes(k))
+                .join(", ")}`,
+            );
+          });
+          return row;
+        },
+      );
+      res.json(updated);
     }),
   );
   app.delete(
     "/api/records/:entity/:id",
-    safe((req, res) => {
+    safe(async (req, res) => {
       const entity = req.params.entity as Entity;
       if (
         !ENTITIES.includes(entity) ||
@@ -2674,8 +2799,8 @@ export function createApi(
       requireWrite(req.actor, entity);
       if (!["Super Admin", "Admin", "Manager"].includes(req.actor.role))
         fail(403, "Only managers or administrators can delete records");
-      const row = s.get(req.actor.space, entity, req.params.id);
-      if (!row || !allowed(req.actor, entity, row))
+      const row = await s.get(req.actor.space, entity, req.params.id);
+      if (!row || !(await allowed(req.actor, entity, row)))
         fail(404, "Record not found");
       if (["farmLocations", "fieldValidations"].includes(entity))
         fail(
@@ -2701,11 +2826,11 @@ export function createApi(
         )[entity];
         if (
           key &&
-          s.db
+          (await s.db
             .prepare(
               `SELECT id FROM records WHERE space=? AND entity=? AND json_extract(data,'$.${key}')=? LIMIT 1`,
             )
-            .get(req.actor.space, child, row.id)
+            .get(req.actor.space, child, row.id))
         )
           fail(
             409,
@@ -2733,7 +2858,9 @@ export function createApi(
         warehouses: [["movements", "warehouseId"]],
       };
       for (const [target, key] of refs[entity] || [])
-        if (s.all(req.actor.space, target).some((r) => r[key] === row.id))
+        if (
+          (await s.all(req.actor.space, target)).some((r) => r[key] === row.id)
+        )
           fail(
             409,
             `This ${entity} record is still referenced by ${target}. Reassign or archive it first.`,
@@ -2742,9 +2869,9 @@ export function createApi(
         fail(409, "Remove attached documents before deleting this farmer");
       if (entity === "warehouses" && row.currentInventory > 0)
         fail(409, "Dispatch remaining inventory before removing a warehouse");
-      s.transaction(() => {
-        s.remove(req.actor.space, entity, row.id);
-        s.audit(
+      await s.transaction(async () => {
+        await s.remove(req.actor.space, entity, row.id);
+        await s.audit(
           req.actor,
           "DELETE",
           entity,
@@ -2758,34 +2885,42 @@ export function createApi(
   app.use("/api", (_req, res) =>
     res.status(404).json({ error: "API endpoint not found" }),
   );
-  app.use((error: any, _req: Request, res: Response, _next: NextFunction) => {
-    const googleFailure = googleApiFailure(error);
-    if (
-      googleFailure?.code === "GOOGLE_RECONNECT_REQUIRED" &&
-      (_req as R).actor
-    ) {
-      const a = (_req as R).actor;
-      s.db
-        .prepare("DELETE FROM integrations WHERE space=? AND user_id=?")
-        .run(a.space, a.id);
-    }
-    const status =
-      googleFailure?.status ||
-      error.status ||
-      (String(error.message).includes("UNIQUE constraint") ? 409 : 400);
-    res.status(status).json({
-      ...(error.code?.startsWith?.("GOOGLE_")
-        ? { code: error.code }
-        : googleFailure
-          ? { code: googleFailure.code }
-          : {}),
-      error:
-        googleFailure?.message ||
-        error.publicMessage ||
-        (status >= 500
-          ? "The service could not complete this request. Check configuration and try again."
-          : error.message || "Request failed"),
-    });
-  });
+  app.use(
+    async (error: any, _req: Request, res: Response, _next: NextFunction) => {
+      const googleFailure = googleApiFailure(error);
+      if (
+        googleFailure?.code === "GOOGLE_RECONNECT_REQUIRED" &&
+        (_req as R).actor
+      ) {
+        const a = (_req as R).actor;
+        await s.db
+          .prepare("DELETE FROM integrations WHERE space=? AND user_id=?")
+          .run(a.space, a.id);
+      }
+      const status =
+        googleFailure?.status ||
+        error.status ||
+        (error.code === "23505" ||
+        String(error.message).includes("UNIQUE constraint")
+          ? 409
+          : 400);
+      res.status(status).json({
+        ...(error.code?.startsWith?.("GOOGLE_")
+          ? { code: error.code }
+          : googleFailure
+            ? { code: googleFailure.code }
+            : {}),
+        error:
+          googleFailure?.message ||
+          error.publicMessage ||
+          (error.code === "23505"
+            ? "A record with this identity or reference already exists. Review the existing record."
+            : null) ||
+          (status >= 500
+            ? "The service could not complete this request. Check configuration and try again."
+            : error.message || "Request failed"),
+      });
+    },
+  );
   return { app, store: s };
 }

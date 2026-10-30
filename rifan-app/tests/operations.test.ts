@@ -1,13 +1,13 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
-import { createApi } from "../server/api";
+import { createTestApi as createApi } from "./database";
 import { analyse } from "../server/features/intelligence";
 import { validateBoundary } from "../server/features/operations";
 const mail: any[] = [];
 let paid: any = {};
 const secret = "fixture-secret-never-a-live-key";
-const { app, store } = createApi({
+const { app, store } = await createApi({
   filename: ":memory:",
   demo: true,
   mailer: {
@@ -37,7 +37,7 @@ let cookie = "",
 const password = "fixture-password-12345";
 after(async () => {
   await new Promise<void>((r) => server.close(() => r()));
-  store.db.close();
+  await store.db.close();
 });
 async function call(
   path: string,
@@ -305,19 +305,19 @@ test("connected programme, cohort, history, planner and payment workflows", asyn
   await t.test(
     "failed-source export contains every row and reasons beyond the review page",
     async () => {
-      const actor = store.db
+      const actor = (await store.db
         .prepare("SELECT space FROM users WHERE id=?")
-        .get(ownerId) as any;
-      store.put(actor.space, "imports", {
+        .get(ownerId)) as any;
+      await store.put(actor.space, "imports", {
         id: "failure-fixture",
         name: "Synthetic source",
       });
-      store.transaction(() => {
+      await store.transaction(async () => {
         const stmt = store.db.prepare(
           "INSERT INTO source_records(batch_id,space,source_row,raw,status,reason) VALUES(?,?,?,?,?,?)",
         );
         for (let i = 1; i <= 751; i++)
-          stmt.run(
+          await stmt.run(
             "failure-fixture",
             actor.space,
             i,

@@ -18,13 +18,15 @@ import {
 } from "../src/lib/importing";
 const file = process.argv[2];
 if (!file) throw new Error("Pass a local spreadsheet or ZIP path");
-const { app, store } = createApi({
+const { app, store } = await createApi({
   filename: process.env.RIFAN_DB_PATH || ".data/rifan.sqlite",
   demo: false,
 });
 const server = app.listen(0, "127.0.0.1");
 await new Promise<void>((resolve) => server.once("listening", resolve));
-const address = server.address() as { port: number };
+const address = server.address() as {
+  port: number;
+};
 const base = `http://127.0.0.1:${address.port}`;
 const token = randomBytes(32).toString("hex"),
   id = "import-service-" + randomUUID();
@@ -36,7 +38,7 @@ const actor = {
   space: "workspace",
   demo: false,
 };
-store.db
+await store.db
   .prepare(
     "INSERT INTO users(id,space,email,name,role,hash,salt) VALUES(?,?,?,?,?,?,?)",
   )
@@ -49,7 +51,7 @@ store.db
     randomBytes(64).toString("hex"),
     randomBytes(16).toString("hex"),
   );
-store.db
+await store.db
   .prepare(
     "INSERT INTO sessions(token,user_id,space,expires,data) VALUES(?,?,?,?,?)",
   )
@@ -96,7 +98,7 @@ try {
   } catch (e: any) {
     report.status = "Blocked: invalid source file";
     report.error = e.message;
-    store.put("workspace", "imports", {
+    await store.put("workspace", "imports", {
       id: "blocked-" + report.sha256.slice(0, 20),
       name: report.source,
       date: new Date().toISOString(),
@@ -127,16 +129,16 @@ try {
         batchId,
       }),
     );
-    const previous = store.db
+    const previous = (await store.db
       .prepare("SELECT count(*) AS n FROM source_records WHERE batch_id=?")
-      .get(batchId) as any;
+      .get(batchId)) as any;
     const reviewRows = new Set(
       (
-        store.db
+        (await store.db
           .prepare(
             "SELECT source_row FROM source_records WHERE batch_id=? AND status='Invalid'",
           )
-          .all(batchId) as any[]
+          .all(batchId)) as any[]
       ).map((r) => r.source_row),
     );
     for (let offset = 0; offset < total; offset += 500) {
@@ -178,7 +180,7 @@ try {
           }),
         );
     }
-    const issueCounts = store.db
+    const issueCounts = await store.db
       .prepare(
         "SELECT reason,count(*) AS count FROM source_records WHERE batch_id=? AND status='Invalid' GROUP BY reason ORDER BY count DESC",
       )
@@ -212,12 +214,12 @@ try {
     JSON.stringify(report, null, 2),
     { mode: 0o600 },
   );
-  store.db.prepare("DELETE FROM sessions WHERE user_id=?").run(id);
-  store.db.prepare("DELETE FROM users WHERE id=?").run(id);
+  await store.db.prepare("DELETE FROM sessions WHERE user_id=?").run(id);
+  await store.db.prepare("DELETE FROM users WHERE id=?").run(id);
   await new Promise<void>((resolve, reject) =>
     server.close((e) => (e ? reject(e) : resolve())),
   );
-  store.db.close();
+  await store.db.close();
   console.log(
     JSON.stringify({
       report: path.join(".data/source", name),

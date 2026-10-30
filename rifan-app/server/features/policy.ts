@@ -7,7 +7,11 @@ export function primaryScope(a: Session, r: Row) {
     (!a.lgas?.length || a.lgas.includes(r.lga))
   );
 }
-export function relationshipScope(s: Store, a: Session, farmerId: string) {
+export async function relationshipScope(
+  s: Store,
+  a: Session,
+  farmerId: string,
+) {
   const parts = [
       "space=?",
       "entity IN ('participations','farmLocations','fieldValidations')",
@@ -29,9 +33,9 @@ export function relationshipScope(s: Store, a: Session, farmerId: string) {
       args.push(...values);
     }
   }
-  return !!s.db
+  return !!(await s.db
     .prepare(`SELECT id FROM records WHERE ${parts.join(" AND ")} LIMIT 1`)
-    .get(...args);
+    .get(...args));
 }
 export function farmerScopeSql(a: Session) {
   const primary: string[] = [],

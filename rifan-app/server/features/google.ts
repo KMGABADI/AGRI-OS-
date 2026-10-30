@@ -10,9 +10,10 @@ export const GOOGLE_SCOPES = [
   "https://www.googleapis.com/auth/forms.body",
 ];
 export const GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.send";
-export type GoogleOAuthFactory = (
-  redirectUri: string,
-) => Promise<{ google: any; client: any }>;
+export type GoogleOAuthFactory = (redirectUri: string) => Promise<{
+  google: any;
+  client: any;
+}>;
 export function googleError(
   status: number,
   code: string,
@@ -52,16 +53,16 @@ export function createGoogleConnection(
         ? "Google sign-in requires an HTTPS public application URL outside localhost."
         : null;
   const configured = missing.length === 0 && !configurationError;
-  const row = (a: Session) =>
-    s.db
+  const row = async (a: Session) =>
+    (await s.db
       .prepare("SELECT * FROM integrations WHERE space=? AND user_id=?")
-      .get(a.space, a.id) as any;
+      .get(a.space, a.id)) as any;
   const usable = (token: any) =>
     !!token?.access_token &&
     (!token.client_id || token.client_id === clientId) &&
     (!!token.refresh_token || Number(token.expires) > Date.now() + 30000);
-  const status = (a: Session) => {
-    const token = row(a);
+  const status = async (a: Session) => {
+    const token = await row(a);
     return {
       configured,
       connected: configured && usable(token),
@@ -102,14 +103,16 @@ export function createGoogleConnection(
         "Sign in to your private RIFAN workspace to connect a real Google account.",
       );
     const { client } = await oauthClient();
-    s.db.prepare("DELETE FROM oauth_states WHERE expires<?").run(Date.now());
+    await s.db
+      .prepare("DELETE FROM oauth_states WHERE expires<?")
+      .run(Date.now());
     if (
       (
-        s.db
+        (await s.db
           .prepare(
             "SELECT count(*) AS n FROM oauth_states WHERE space=? AND user_id=?",
           )
-          .get(req.actor.space, req.actor.id) as any
+          .get(req.actor.space, req.actor.id)) as any
       ).n >= 10
     )
       googleError(
@@ -126,8 +129,10 @@ export function createGoogleConnection(
         ? [GMAIL_SCOPE]
         : []),
     ];
-    s.db.prepare("DELETE FROM oauth_states WHERE expires<?").run(Date.now());
-    s.db
+    await s.db
+      .prepare("DELETE FROM oauth_states WHERE expires<?")
+      .run(Date.now());
+    await s.db
       .prepare(
         "INSERT INTO oauth_states(state_hash,user_id,space,expires,redirect_uri,verifier,scopes) VALUES(?,?,?,?,?,?,?)",
       )
@@ -155,7 +160,7 @@ export function createGoogleConnection(
   const mount = (app: Express) => {
     app.get(
       "/api/google/status",
-      route((req, res) => res.json(status(req.actor))),
+      route(async (req, res) => res.json(await status(req.actor))),
     );
     app.post(
       "/api/google/connect",
@@ -187,7 +192,7 @@ export function createGoogleConnection(
           finish(res, "invalid_state");
           return;
         }
-        const state = s.db
+        const state = (await s.db
           .prepare(
             "DELETE FROM oauth_states WHERE state_hash=? AND user_id=? AND space=? RETURNING *",
           )
@@ -195,7 +200,7 @@ export function createGoogleConnection(
             createHash("sha256").update(value).digest("hex"),
             req.actor.id,
             req.actor.space,
-          ) as any;
+          )) as any;
         if (
           !state ||
           state.expires < Date.now() ||
@@ -232,15 +237,15 @@ export function createGoogleConnection(
             finish(res, "missing_token");
             return;
           }
-          const previous = row(req.actor);
+          const previous = await row(req.actor);
           const sameClient =
             previous &&
             (!previous.client_id || previous.client_id === clientId);
           const refreshToken =
             tokens.refresh_token ||
             (sameClient ? previous.refresh_token : null);
-          s.transaction(() => {
-            s.db
+          await s.transaction(async () => {
+            await s.db
               .prepare(
                 "INSERT INTO integrations(space,user_id,access_token,refresh_token,expires,client_id,scopes) VALUES(?,?,?,?,?,?,?) ON CONFLICT(space,user_id) DO UPDATE SET access_token=excluded.access_token,refresh_token=excluded.refresh_token,expires=excluded.expires,client_id=excluded.client_id,scopes=excluded.scopes",
               )
@@ -253,7 +258,7 @@ export function createGoogleConnection(
                 clientId!,
                 tokens.scope || state.scopes,
               );
-            s.audit(
+            await s.audit(
               req.actor,
               "GOOGLE_CONNECTED",
               "integrations",
@@ -274,15 +279,15 @@ export function createGoogleConnection(
     );
     app.post(
       "/api/google/disconnect",
-      route((req, res) => {
-        s.transaction(() => {
-          s.db
+      route(async (req, res) => {
+        await s.transaction(async () => {
+          await s.db
             .prepare("DELETE FROM integrations WHERE space=? AND user_id=?")
             .run(req.actor.space, req.actor.id);
-          s.db
+          await s.db
             .prepare("DELETE FROM oauth_states WHERE space=? AND user_id=?")
             .run(req.actor.space, req.actor.id);
-          s.audit(
+          await s.audit(
             req.actor,
             "GOOGLE_DISCONNECTED",
             "integrations",
@@ -295,7 +300,7 @@ export function createGoogleConnection(
     );
   };
   const googleFor = async (a: Session, requiredScope?: string) => {
-    const saved = row(a);
+    const saved = await row(a);
     if (!saved)
       googleError(
         409,
@@ -325,23 +330,26 @@ export function createGoogleConnection(
       refresh_token: saved.refresh_token || undefined,
       expiry_date: saved.expires,
     });
+    let tokenWrite: Promise<void> = Promise.resolve();
     client.on("tokens", (tokens: any) => {
-      const current = row(a);
-      if (!current || (current.client_id && current.client_id !== clientId))
-        return;
-      s.db
-        .prepare(
-          "UPDATE integrations SET access_token=?,refresh_token=?,expires=?,client_id=?,scopes=? WHERE space=? AND user_id=?",
-        )
-        .run(
-          tokens.access_token || current.access_token,
-          tokens.refresh_token || current.refresh_token || null,
-          tokens.expiry_date || current.expires,
-          clientId!,
-          tokens.scope || current.scopes || null,
-          a.space,
-          a.id,
-        );
+      tokenWrite = tokenWrite.then(async () => {
+        const current = await row(a);
+        if (!current || (current.client_id && current.client_id !== clientId))
+          return;
+        await s.db
+          .prepare(
+            "UPDATE integrations SET access_token=?,refresh_token=?,expires=?,client_id=?,scopes=? WHERE space=? AND user_id=?",
+          )
+          .run(
+            tokens.access_token || current.access_token,
+            tokens.refresh_token || current.refresh_token || null,
+            tokens.expiry_date || current.expires,
+            clientId!,
+            tokens.scope || current.scopes || null,
+            a.space,
+            a.id,
+          );
+      });
     });
     if (!saved.access_token || Number(saved.expires) <= Date.now() + 30000) {
       if (!saved.refresh_token)
@@ -352,6 +360,7 @@ export function createGoogleConnection(
         );
       try {
         await client.getAccessToken();
+        await tokenWrite;
       } catch (error: any) {
         const reason = error?.response?.data?.error;
         if (
@@ -359,7 +368,7 @@ export function createGoogleConnection(
           reason === "invalid_client" ||
           error?.code === 401
         ) {
-          s.db
+          await s.db
             .prepare("DELETE FROM integrations WHERE space=? AND user_id=?")
             .run(a.space, a.id);
           googleError(

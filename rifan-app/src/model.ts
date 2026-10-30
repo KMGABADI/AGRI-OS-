@@ -64,6 +64,7 @@ export interface Session {
   lgas?: string[];
   warehouseIds?: string[];
   plannerApproved?: boolean;
+  mustChangePassword?: boolean;
 }
 export interface Snapshot {
   data: Record<Entity, Row[]>;

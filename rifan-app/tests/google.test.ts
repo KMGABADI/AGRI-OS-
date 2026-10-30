@@ -2,7 +2,7 @@ import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { createHash } from "node:crypto";
-import { createApi } from "../server/api";
+import { createTestApi as createApi } from "./database";
 import { GOOGLE_SCOPES, GMAIL_SCOPE } from "../server/features/google";
 const fixtures: any[] = [];
 const origin = "https://rifan-oauth.example.test";
@@ -73,7 +73,7 @@ async function fixture(configured: boolean) {
       return { token: "fixture-refreshed" };
     }
   }
-  const created = createApi({
+  const created = await createApi({
     filename: ":memory:",
     demo: true,
     googleOAuthFactory: async () => ({
@@ -135,7 +135,7 @@ async function fixture(configured: boolean) {
       return new URL(r.body.url);
     },
     async callback(url: URL, query = "code=fixture-code") {
-      return call(
+      return await call(
         "/api/google/callback?state=" +
           url.searchParams.get("state") +
           "&" +
@@ -149,7 +149,7 @@ async function fixture(configured: boolean) {
 after(async () => {
   for (const f of fixtures) {
     await new Promise<void>((r) => f.server.close(() => r()));
-    f.store.db.close();
+    await f.store.db.close();
   }
 });
 test("missing Google configuration stays inside the app and exposes no credentials", async () => {
@@ -183,9 +183,9 @@ test("OAuth authorization, PKCE, callbacks, refresh and disconnect", async (t) =
       );
       assert.equal(url.searchParams.get("code_challenge_method"), "S256");
       assert.ok(!url.searchParams.get("scope")!.includes(GMAIL_SCOPE));
-      const stored = f.store.db
+      const stored = (await f.store.db
         .prepare("SELECT * FROM oauth_states")
-        .get() as any;
+        .get()) as any;
       assert.notEqual(stored.state_hash, url.searchParams.get("state"));
       assert.equal(
         stored.state_hash,
@@ -234,7 +234,7 @@ test("OAuth authorization, PKCE, callbacks, refresh and disconnect", async (t) =
     "expired state, missing code and lost RIFAN session return recovery URLs",
     async () => {
       let url = await f.begin();
-      f.store.db.prepare("UPDATE oauth_states SET expires=0").run();
+      await f.store.db.prepare("UPDATE oauth_states SET expires=0").run();
       assert.equal(
         (await f.callback(url)).location,
         "/connections?google=invalid_state",
@@ -277,9 +277,9 @@ test("OAuth authorization, PKCE, callbacks, refresh and disconnect", async (t) =
       );
       assert.equal(
         (
-          f.store.db
+          (await f.store.db
             .prepare("SELECT refresh_token FROM integrations WHERE space=?")
-            .get("workspace") as any
+            .get("workspace")) as any
         ).refresh_token,
         "fixture-refresh",
       );
@@ -288,18 +288,18 @@ test("OAuth authorization, PKCE, callbacks, refresh and disconnect", async (t) =
   await t.test(
     "refresh persists rotated credentials and handles revoked grants",
     async () => {
-      f.store.db.prepare("UPDATE integrations SET expires=0").run();
+      await f.store.db.prepare("UPDATE integrations SET expires=0").run();
       assert.equal((await f.call("/api/google/folders")).status, 200);
       assert.equal(f.state.refreshes, 1);
       assert.equal(
         (
-          f.store.db
+          (await f.store.db
             .prepare("SELECT refresh_token FROM integrations")
-            .get() as any
+            .get()) as any
         ).refresh_token,
         "fixture-rotated",
       );
-      f.store.db.prepare("UPDATE integrations SET expires=0").run();
+      await f.store.db.prepare("UPDATE integrations SET expires=0").run();
       f.state.failRefresh = "invalid_grant";
       const failed = await f.call("/api/google/folders");
       assert.equal(failed.status, 409);
@@ -320,7 +320,7 @@ test("OAuth authorization, PKCE, callbacks, refresh and disconnect", async (t) =
         (await f.call("/api/google/status")).body.gmailAuthorized,
         true,
       );
-      f.store.put("workspace", "workbooks", {
+      await f.store.put("workspace", "workbooks", {
         id: "fixture-workbook",
         name: "Retain workbook",
         url: "https://docs.google.com/spreadsheets/d/fixture/edit",
@@ -332,13 +332,15 @@ test("OAuth authorization, PKCE, callbacks, refresh and disconnect", async (t) =
       assert.equal((await f.call("/api/google/status")).body.connected, false);
       assert.equal(
         (
-          f.store.db
+          (await f.store.db
             .prepare("SELECT count(*) AS n FROM oauth_states")
-            .get() as any
+            .get()) as any
         ).n,
         0,
       );
-      assert.ok(f.store.get("workspace", "workbooks", "fixture-workbook"));
+      assert.ok(
+        await f.store.get("workspace", "workbooks", "fixture-workbook"),
+      );
     },
   );
   await t.test(

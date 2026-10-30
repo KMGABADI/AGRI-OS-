@@ -40,6 +40,11 @@ async function start(cwd, database, executable = entry, overrides = {}) {
     env: {
       ...process.env,
       NODE_ENV: "production",
+      DATABASE_URL: "",
+      DATABASE_PROVIDER: "sqlite",
+      DATABASE_AUTO_MIGRATE: "true",
+      BOOTSTRAP_ADMIN_PASSWORD: "",
+      BOOTSTRAP_ADMIN_EMAIL: "",
       RENDER: "true",
       PORT: String(port),
       RIFAN_DB_PATH: database,

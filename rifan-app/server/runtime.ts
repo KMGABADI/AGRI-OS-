@@ -19,13 +19,21 @@ export function runtimeConfig(env: NodeJS.ProcessEnv = process.env) {
     );
   }
   const configured = env.RIFAN_DB_PATH;
+  const databaseUrl = env.DATABASE_URL?.trim();
+  if (env.DATABASE_PROVIDER === "postgres" && !databaseUrl)
+    throw new Error(
+      "DATABASE_URL is required for PostgreSQL; refusing to start with an empty local database.",
+    );
+  if (databaseUrl && !/^postgres(?:ql)?:\/\//.test(databaseUrl))
+    throw new Error("DATABASE_URL must use postgresql://");
   return {
     host,
     port,
     distDir: path.join(appRoot, "dist"),
     database:
-      configured === ":memory:"
+      databaseUrl ||
+      (configured === ":memory:"
         ? configured
-        : path.resolve(appRoot, configured || ".data/rifan.sqlite"),
+        : path.resolve(appRoot, configured || ".data/rifan.sqlite")),
   };
 }

@@ -4,6 +4,8 @@ For Render, follow [RENDER.md](RENDER.md). It covers the install-without-build f
 
 ## Runtime
 
+For PostgreSQL production and persistent user accounts, follow [POSTGRES_DIGITALOCEAN.md](POSTGRES_DIGITALOCEAN.md). `DATABASE_URL` selects PostgreSQL; the SQLite path below remains a local/legacy option.
+
 Use Node.js 24.x and run commands from `rifan-app/`. The main service defaults to port 3001. `npm run dev` serves Express + Vite; `npm run build` prepares assets and `dist/server.mjs`; `npm start` serves the production build.
 
 | Variable                          | Purpose                                                                                  |

@@ -15,7 +15,7 @@ export const route =
 export interface FeatureContext {
   app: Express;
   s: Store;
-  allowed: (a: Session, e: Entity, r: Row) => boolean;
+  allowed: (a: Session, e: Entity, r: Row) => Promise<boolean>;
   requireWrite: (a: Session, e: Entity | "settings" | "users") => void;
   farmerWhere: (a: Session, filters?: any) => { where: string; args: any[] };
 }

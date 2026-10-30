@@ -21,7 +21,8 @@ npm run dev
 The application serves on port **3001**. Open it through your hosting platform's supported app access. This onboarding environment does not provide a localhost preview link.
 
 - **Explore the demo workspace** opens 84 synthetic records, isolated from real data.
-- **First time here? Create your workspace** initializes the private workspace administrator. Use your own email and a strong password. No default administrator password exists.
+- A PostgreSQL deployment retains accounts across redeployments. The persistent initial administrator defaults to `admin@rifan.local`; seed its password securely once with `BOOTSTRAP_ADMIN_PASSWORD` or `npm run admin:bootstrap`. First sign-in requires a password change. The prepared migration already includes this administrator; initial credentials remain in the private `.data/initial-admin-credentials.txt` file, never in GitHub.
+- **First time here? Create your workspace** remains available only for an installation with no existing administrator or bootstrap configuration.
 - The supplied farmer register is already in the private workspace; it is not visible in the demo.
 - Do not expose a fresh instance publicly before initializing its owner account.
 
@@ -32,7 +33,7 @@ npm run build
 npm start      # production build; port 3001 unless PORT is set
 ```
 
-Live processes must restart in new environments. Dependencies, source, built assets and the SQLite files can be retained in the environment snapshot. Setup does not deploy or publish this app.
+Live processes must restart in new environments. Dependencies, source, built assets and local SQLite backup files can be retained in the environment snapshot. Setup does not deploy or publish this app.
 
 ## What's included
 
@@ -70,7 +71,7 @@ See [the data import report](docs/DATA_IMPORT_REPORT.md), [system analysis](docs
 5. Export writes into the dedicated **RIFAN Registry** worksheet in batches, preserving original source worksheets. It excludes BVN, NIN and bank details.
 6. For custom headings or file uploads, use **Data hub → Google Sheets** and the mapping interface.
 
-Synchronization is an explicitly reviewed action, not a background claim of continuous replication. The SQLite database retains payments, accounts, audit history and source provenance. The connected Sheet is a member-register source, rather than a place to store authentication credentials or the payment ledger. Sheet previews accept up to 250,000 rows; larger registers must be split by worksheet. Live Google authorization remains outstanding in this environment.
+Synchronization is an explicitly reviewed action, not a background claim of continuous replication. The application database (PostgreSQL in production, or SQLite for local compatibility) retains payments, accounts, audit history and source provenance. The connected Sheet is a member-register source, rather than a place to store authentication credentials or the payment ledger. Sheet previews accept up to 250,000 rows; larger registers must be split by worksheet. Live Google authorization remains outstanding in this environment.
 
 ## Future farmer website and payment collection
 
@@ -79,3 +80,5 @@ The future public website can submit consented applications to `POST /api/public
 The public website, farmer self-service accounts, live online charging, payment-provider webhooks and provider reconciliation must be implemented/configured before launch. No fee amount or payment provider was invented. Current payments are manual ledger entries, counted only after administrator verification; this application does not charge an account or transfer money.
 
 See [connected operations and security configuration](docs/OPERATIONS.md) for Dashboard, cohorts, planner, history, OTP and Paystack setup.
+
+For the PostgreSQL migration, DigitalOcean provisioning, persistent administrator and concurrent access, follow [the PostgreSQL deployment guide](docs/POSTGRES_DIGITALOCEAN.md).
